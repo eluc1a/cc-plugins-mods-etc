@@ -1,0 +1,7 @@
+{
+  "name": "workbench",
+  "version": "0.1.0",
+  "description": "Spend gate on paid commands, turn receipt on each turn.",
+  "author": { "name": "elucia" },
+  "types": "./types/index.d.ts"
+}
