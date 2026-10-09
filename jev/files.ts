@@ -36,10 +36,14 @@ export function keywordRank(query: string, files: File[]) {
   return files.map(f => ({ f, s: score(f) })).sort((a, b) => b.s - a.s).map(x => x.f)
 }
 
-// What Jev reads about a file besides its path: the first comment line and the names it defines.
-export function card(f: File) {
+// The catalog key of a file version.
+export const hashOf = (text: string) => Bun.hash(text).toString(16)
+
+// What Jev reads about a file besides its path: its catalog purpose line, else the first comment line, and
+// the names it defines.
+export function card(f: File, purpose?: string) {
   const lines = f.text.split('\n')
-  const note = lines.find(l => /^\s*(\/\/|#|\/\*|\*|""")\s*\w/.test(l))?.replace(/^\s*(\/\/|#|\/\*+|\*|""")\s*/, '').trim()
+  const note = purpose ?? lines.find(l => /^\s*(\/\/|#|\/\*|\*|""")\s*\w/.test(l))?.replace(/^\s*(\/\/|#|\/\*+|\*|""")\s*/, '').trim()
   const names = [...f.text.matchAll(/^\s*(?:export\s+)?(?:default\s+)?(?:async\s+)?(?:function|class|def|interface|type|struct|fn|func|const|enum)\s+([A-Za-z_]\w*)/gm)]
     .map(m => m[1])
     .slice(0, 12)
@@ -49,10 +53,10 @@ export function card(f: File) {
 const shortlist = (query: string, files: File[]) => keywordRank(query, files).slice(0, MAX_OPTIONS)
 
 // Jev's probability per candidate, best first; ties keep the keyword order.
-export async function jevRank(query: string, files: File[], withCards = true): Promise<Ranked> {
+export async function jevRank(query: string, files: File[], withCards = true, catalog?: Map<string, string>): Promise<Ranked> {
   const cands = shortlist(query, files)
   const budget = Math.floor(OPTION_CHARS / Math.max(1, cands.length)) - 60
-  const criteria = Object.fromEntries(cands.map(f => [f.path, withCards ? (card(f)?.slice(0, Math.max(0, budget)) ?? null) : null]))
+  const criteria = Object.fromEntries(cands.map(f => [f.path, withCards ? (card(f, catalog?.get(hashOf(f.text)))?.slice(0, Math.max(0, budget)) ?? null) : null]))
   const { body, cost, ms } = await ask({
     model: JEV_MODEL,
     state: { task: query },

@@ -3,11 +3,14 @@
 // the ones the commit modified (a file it added was not there to find). Every method gets the same keyword
 // shortlist of 255, so the table compares rankers, and the shortlist line shows what the prefilter loses.
 //
-// Run: jev/run.sh files-eval [--repos ~/dev/a,~/dev/b] [--n 25] [--no-haiku]
-import { mkdirSync, writeFileSync } from 'node:fs'
+// A catalog (CACHE/purposes.jsonl: a purpose line per file version, by content hash) adds the method
+// "jev catalog". --dump <dir> writes the head of each shortlisted path, for whoever writes those lines, and stops.
+//
+// Run: jev/run.sh files-eval [--repos ~/dev/a,~/dev/b] [--n 25] [--no-haiku] [--dump <dir>]
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 
 import { CACHE, pct, pool, quantile } from './client'
-import { haikuRank, isCode, jevRank, keywordRank, MAX_OPTIONS } from './files'
+import { haikuRank, hashOf, isCode, jevRank, keywordRank, MAX_OPTIONS } from './files'
 import type { File, Ranked } from './files'
 
 type Case = { repo: string; sha: string; query: string; gold: string[]; files: File[] }
@@ -64,21 +67,53 @@ async function cases(repo: string): Promise<Case[]> {
 }
 
 const all = (await Promise.all(repos.map(cases))).flat()
+const shortlist = (c: Case) => keywordRank(c.query, c.files).slice(0, MAX_OPTIONS)
+
+const dump = flag('--dump')
+if (dump !== undefined) {
+  // One purpose line per path, written from its oldest version here (the cases run newest first): a line from
+  // an older version cannot describe a later change. The writer gets the head of the file.
+  // ponytail: 6000 characters per file, enough for a purpose line; raise it if the lines come out vague
+  mkdirSync(dump, { recursive: true })
+  const oldest = new Map<string, File>()
+  const versions: string[] = []
+  for (const c of all) {
+    for (const f of shortlist(c).filter(f => f.text.trim() !== '')) {
+      const path = `${c.repo}/${f.path}`
+      oldest.set(path, f)
+      versions.push(`${hashOf(f.text)}\t${path}\n`)
+    }
+  }
+  const todo = [...oldest].map(([path, f]) => ({ id: hashOf(path), path, text: f.text.slice(0, 6000) }))
+  for (const t of todo) {
+    writeFileSync(`${dump}/${t.id}`, t.text)
+  }
+  writeFileSync(`${dump}/todo.tsv`, todo.map(t => `${t.id}\t${t.path}\n`).join(''))
+  writeFileSync(`${dump}/versions.tsv`, [...new Set(versions)].join(''))
+  console.log(`${todo.length} paths (${[...new Set(versions)].length} versions) in ${dump}`)
+  process.exit(0)
+}
+
+const purposes = `${CACHE}/purposes.jsonl`
+const catalog = existsSync(purposes)
+  ? new Map(readFileSync(purposes, 'utf8').trim().split('\n').map(l => JSON.parse(l)).map(p => [p.hash as string, p.purpose as string]))
+  : undefined
 const methods: Record<string, (c: Case) => Promise<Ranked>> = {
   keyword: async c => ({ ranked: keywordRank(c.query, c.files).map(f => f.path), cost: 0, ms: 0 }),
   'jev paths': c => jevRank(c.query, c.files, false),
   'jev cards': c => jevRank(c.query, c.files, true),
+  ...(catalog !== undefined ? { 'jev catalog': (c: Case) => jevRank(c.query, c.files, true, catalog) } : {}),
   ...(withHaiku ? { 'haiku cards': (c: Case) => haikuRank(c.query, c.files) } : {}),
 }
 const names = Object.keys(methods)
 console.log(`Ranking files for ${all.length} past commits with: ${names.join(', ')}...`)
 
 const rows = await pool(all, 4, async c => {
-  const shortlist = new Set(keywordRank(c.query, c.files).slice(0, MAX_OPTIONS).map(f => f.path))
+  const listed = new Set(shortlist(c).map(f => f.path))
   const got = await Promise.all(
     names.map(m => (methods[m] as (c: Case) => Promise<Ranked>)(c).catch(err => ({ ranked: [], cost: 0, ms: 0, error: String(err) }))),
   )
-  return { c, inShortlist: c.gold.some(g => shortlist.has(g)), got: Object.fromEntries(names.map((m, i) => [m, got[i] as Ranked & { error?: string }])) }
+  return { c, inShortlist: c.gold.some(g => listed.has(g)), got: Object.fromEntries(names.map((m, i) => [m, got[i] as Ranked & { error?: string }])) }
 })
 
 const hit = (r: (typeof rows)[number], m: string, k: number) => r.c.gold.some(g => r.got[m]?.ranked.slice(0, k).includes(g))
@@ -86,7 +121,12 @@ const share = (f: (r: (typeof rows)[number]) => boolean) => rows.filter(f).lengt
 const byRepo = [...new Set(all.map(c => c.repo))].map(r => `${r} ${all.filter(c => c.repo === r).length}`).join(', ')
 
 console.log(`\nFile-ranking eval · ${rows.length} past commits (${byRepo}) · gold = the code files each commit modified`)
-console.log(`Keyword shortlist of ${MAX_OPTIONS} holds a gold file in ${pct(share(r => r.inShortlist))} of commits\n`)
+console.log(`Keyword shortlist of ${MAX_OPTIONS} holds a gold file in ${pct(share(r => r.inShortlist))} of commits`)
+if (catalog !== undefined) {
+  const listed = all.flatMap(shortlist)
+  console.log(`Catalog has a purpose line for ${pct(listed.filter(f => catalog.has(hashOf(f.text))).length / Math.max(1, listed.length))} of shortlisted files`)
+}
+console.log('')
 console.log(`  method        hit@1  hit@5  hit@10   $/query    p50 ms  errors`)
 for (const m of names) {
   const cost = rows.reduce((s, r) => s + (r.got[m]?.cost ?? 0), 0) / Math.max(1, rows.length)
