@@ -2,6 +2,8 @@ import { expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { AgentInfo, AgentSpawnArgs, AgentStatus, On, PaneOpenArgs } from 'claude-code'
 
+import { diagram } from '../hooks/diagram'
+import type { Node } from '../hooks/diagram'
 import { PALETTE } from '../hooks/register'
 import { JEV_MODEL, JEV_URL, pick, question } from '../hooks/route'
 
@@ -228,8 +230,8 @@ test('each line fits the dock and shows glyph, name, model and time on every sur
   for (const surface of ['terminal', 'desktop'] as const) {
     const ui = await $.ui.mount({ plugin: 'agent-board', surface, component: 'Pane', props: paneProps, requestId: 'agent-board' })
 
-    expect(await text(ui, 'row-a1')).toMatch(/^├ ✓ explore logs\s+haiku\*\s+0:00$/)
-    expect(await text(ui, 'row-a2')).toMatch(/^├ ⠋ task two\s+opus\s+6:00$/)
+    expect(await text(ui, 'row-a1')).toMatch(/^├ ✓ explore logs\s+haiku\*\s+━\s+0:00$/)
+    expect(await text(ui, 'row-a2')).toMatch(/^├ ⠋ task two\s+opus\s+━{8}\s+6:00$/)
     expect(await text(ui, 'now-a2')).toContain('└ Bash: ls')
     expect(await text(ui, 'row-a3')).toMatch(/^└ ○ task three\s+sonnet/)
     expect(await text(ui, 'now-a3')).toContain('idle · cache cold')
@@ -530,11 +532,91 @@ test('r runs /relay now from its own footer line', async ($, on) => {
     return { text: '' }
   })
   const ui = await mount($)
-  expect(await text(ui, 'keys')).toBe('hide done  clear done')
+  expect(await text(ui, 'keys')).toBe('hide done  clear done  diagram')
   expect(await text(ui, 'keys2')).toBe('motion off  handoff  esc close')
   await ui.press({ key: 'handoff' })
   expect(asked).toEqual(['now'])
   await ui.unmount()
+})
+
+test('each lane puts its agent on one time axis, in the color of its status', async ($, on) => {
+  const { agents, clock } = world(on)
+  await spawn($, { prompt: 'p' }) // a1 runs from 0:00 to 0:30
+  await clock.set(30_000)
+  await $.turn.complete(finish('a1', 'ok'))
+  await spawn($, { prompt: 'p' }) // a2 runs from 0:30 on
+  agents.push(info('a1', 'first', 'completed'), info('a2', 'second', 'running'))
+  await clock.set(60_000)
+
+  const ui = await mount($)
+  expect(await text(ui, 'lane-a1')).toMatch(/^━{4}\s*$/)
+  expect(await text(ui, 'lane-a2')).toMatch(/^\s*━{4}$/)
+  expect((await text(ui, 'lane-a2')).length).toBe(8)
+  expect(await text(ui, 'lane-main')).toMatch(/^\s*$/)
+  expect(await prop(ui, 'lane-a1', 'color')).toBe(PALETTE.done)
+  expect(await prop(ui, 'lane-a2', 'color')).toBe(PALETTE.working)
+})
+
+test('v swaps the rows for the box diagram and back; the boxes nest under main', async ($, on) => {
+  const { agents } = world(on)
+  agents.push({ ...info('a1', 'research', 'running'), name: 'research' }, { ...info('a2', 'scan', 'running'), parentId: 'a1' }, info('a3', 'build', 'completed'))
+
+  const ui = await mount($)
+  expect(await text(ui, 'view')).toBe('diagram')
+  await ui.press({ key: 'view' })
+  expect(await ui.find({ key: 'row-a1' })).toBeUndefined()
+  expect(await ui.find({ key: 'footnote' })).toBeUndefined()
+  expect(await text(ui, 'view')).toBe('lanes')
+  const lines = await Promise.all(Array.from({ length: 13 }, (_, y) => text(ui, `dg-${y}`)))
+  expect(lines[1]).toContain('main')
+  expect(lines[6]).toMatch(/research.*build/)
+  expect(lines[11]).toContain('scan')
+  for (const l of lines) {
+    expect(l.length <= WIDTH).toBe(true)
+  }
+
+  await ui.press({ key: 'view' })
+  expect(await ui.find({ key: 'row-a1' })).toBeDefined()
+})
+
+const leaf = (label: string, isLive: boolean): Node => ({ label, glyph: '·', color: 'c', isLive, kids: [] })
+const tree = (...kids: Node[]): Node => ({ label: 'main', glyph: '○', color: 'c', isLive: false, kids })
+// The lit cells of a diagram, as "row:column".
+const lit = (rows: { text: string; color: string }[][]) =>
+  rows.flatMap((runs, y) => {
+    const cells = runs.flatMap(r => [...r.text].map(() => r.color))
+    return cells.flatMap((color, x) => (color === 'pulse' ? [`${y}:${x}`] : []))
+  })
+
+test('a line toward a working agent pulses away from main, one cell a frame; motion off holds the path lit', () => {
+  // Two boxes of 16 under main: 33 columns, centered in 44 from column 5; main's center is column 21.
+  const root = tree(leaf('done', false), leaf('live', true))
+  const at = (frame: number | undefined) => diagram(root, 44, frame, 'line', 'pulse').rows
+
+  expect(lit(at(0))).toEqual(['3:21', '4:24', '4:28'])
+  expect(lit(at(1))).toEqual(['4:21', '4:25', '4:29'])
+  expect([...(at(0)[4] ?? []).map(r => r.text).join('')][24]).toBe('━')
+
+  // Motion off: the stub, the bus from main's center to the live box, and its joint, all lit; none toward the done box.
+  const still = lit(at(undefined))
+  expect(still).toContain('3:21')
+  expect(still).toContain('5:30')
+  expect(still.filter(c => c.startsWith('4:')).length).toBe(10)
+  expect(still.some(c => c.startsWith('4:') && Number(c.split(':')[1]) < 21)).toBe(false)
+})
+
+test('a wide tree narrows its boxes to fit the pane, then cuts at its edge', () => {
+  const kids = (n: number) => Array.from({ length: n }, (_, i) => leaf(`agent ${i}`, false))
+  const width = (rows: { text: string }[][]) => Math.max(...rows.map(r => r.map(x => x.text).join('').length))
+
+  const fits = diagram(tree(...kids(4)), 44, 0, 'line', 'pulse')
+  expect(fits.isCut).toBe(false)
+  expect(width(fits.rows) <= 44).toBe(true)
+
+  const cut = diagram(tree(...kids(8)), 44, 0, 'line', 'pulse')
+  expect(cut.isCut).toBe(true)
+  expect(width(cut.rows)).toBe(44)
+  expect(cut.rows.some(r => r.map(x => x.text).join('').endsWith('…'))).toBe(true)
 })
 
 // WCAG contrast: 4.5:1 is the floor for normal text.

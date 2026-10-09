@@ -2,6 +2,8 @@ import { atom, read, update } from 'claude-code'
 import type { AgentInfo, AgentSpawnInput, AgentStatus, EngineInterface, Register, Timer, ToolCallInput } from 'claude-code'
 
 import type { AgentStat, BoardView } from '../types'
+import { diagram, fit } from './diagram'
+import type { Node } from './diagram'
 import { JEV_URL, MIN_CONFIDENCE, pick, question } from './route'
 import type { Pick } from './route'
 
@@ -18,6 +20,9 @@ const LAST_CALLS = 5
 const WIDTH = 46
 const MODEL_W = 9
 const RIGHT_W = 7
+// The time lanes take a third of a row past its fixed columns; under 6 cells they show nothing.
+const LANE_SHARE = 1 / 3
+const LANE_MIN = 6
 // 8 frames a second: the engine redraws a pane at most 10 times a second.
 const FRAME_MS = 125
 const FLASH_MS = 1000
@@ -46,13 +51,20 @@ type Look = { kind: Kind; glyph: string; color: string; right: string; note?: st
 
 const title = (count: number) => `Agents · ${count}`
 const blank = (at: number): AgentStat => ({ tools: 0, fails: 0, last: [], at, isDone: false, tokens: 0, cached: 0, ms: 0 })
-const fit = (v: string, w: number) => (v.length <= w ? v : `${v.slice(0, Math.max(0, w - 1))}…`)
 const kilo = (n: number) =>
   n < 1000 ? String(n) : n < 10_000 ? `${(n / 1000).toFixed(1)}k` : n < 999_500 ? `${Math.round(n / 1000)}k` : `${(n / 1e6).toFixed(1)}M`
 const minutes = (ms: number) => `${Math.ceil(ms / 60_000)}m`
 const bar = (share: number) => {
   const n = Math.min(5, Math.max(0, Math.ceil(share * 5)))
   return '▰'.repeat(n) + '▱'.repeat(5 - n)
+}
+
+// One agent's run on the shared time axis [t0, t1], at least one cell so a quick run still shows.
+function lane(from: number, to: number, t0: number, t1: number, w: number) {
+  const cell = Math.max(1, t1 - t0) / w
+  const a = Math.max(0, Math.min(w - 1, Math.floor((from - t0) / cell)))
+  const b = Math.max(a, Math.min(w - 1, Math.ceil((to - t0) / cell) - 1))
+  return ' '.repeat(a) + '━'.repeat(b - a + 1) + ' '.repeat(w - 1 - b)
 }
 
 function clock(ms: number) {
@@ -217,7 +229,7 @@ export const register: Register = on => {
     if (ran.deny === undefined && ran.agentId !== undefined) {
       const { model, agentId } = ran
       const info = await entry($, agentId)
-      await touch($, agentId, (s, at) => ({ model, isStar: set !== undefined, route: why, isDone: false, since: at, info: info ?? s.info }))
+      await touch($, agentId, (s, at) => ({ model, isStar: set !== undefined, route: why, isDone: false, since: at, start: s.start ?? at, info: info ?? s.info }))
       watch($)
       animate($)
     }
@@ -235,6 +247,7 @@ export const register: Register = on => {
       last: [...s.last, call].slice(-LAST_CALLS),
       isDone: false,
       since: s.since ?? at,
+      start: s.start ?? at,
     }))
     animate($)
     const ran = await next(e)
@@ -335,6 +348,18 @@ export const register: Register = on => {
     // A returned agent with no live agent under it: `h` hides it, `c` clears it.
     const isDoneTree = (a: AgentInfo): boolean => looks.get(a.id)?.kind === 'done' && kids(a.id).every(isDoneTree)
     const isHidden = (a: AgentInfo) => v.hideDone && isDoneTree(a)
+    // The lanes' time axis: from the first shown start to now, or to the last end once nothing works.
+    const spans = new Map(
+      list.flatMap(a => {
+        const s = stats[a.id]
+        const l = looks.get(a.id)
+        return s?.start === undefined || l === undefined || isHidden(a) ? [] : [[a.id, [s.start, l.kind === 'working' ? now : s.at]] as const]
+      }),
+    )
+    const t0 = Math.min(...[...spans.values()].map(r => r[0]))
+    const t1 = Math.max(...[...spans.values()].map(r => r[1]))
+    const share = Math.floor((width - 3 - MODEL_W - 1 - RIGHT_W) * LANE_SHARE)
+    const laneW = share >= LANE_MIN ? share : 0
     const clear = () =>
       void update($, view, w => ({ ...w, cleared: [...(w.cleared ?? []), ...list.filter(isDoneTree).map(a => a.id)] })).then(() => show($))
     const toggle = (id: string) => () =>
@@ -346,8 +371,9 @@ export const register: Register = on => {
     const rows = (id: string, name: string, pad: string, cont: string, s: AgentStat, l: Look) => {
       const isFlash = !v.still && s.flashAt !== undefined && now - s.flashAt < FLASH_MS
       const model = `${s.model?.replace(/^claude-/, '') ?? ''}${s.isStar === true ? '*' : ''}`
-      const nameW = Math.max(4, width - pad.length - 3 - MODEL_W - 1 - RIGHT_W)
+      const nameW = Math.max(4, width - pad.length - 3 - MODEL_W - 1 - RIGHT_W - (laneW > 0 ? laneW + 1 : 0))
       const label = fit(name, nameW)
+      const run = spans.get(id)
       const detail = (key: string, head: string, value: string, color: string = C.muted) => (
         <Box key={key}>
           <Text color={color} wrap="truncate-end">{`${cont}    ${head.padEnd(8)}${value}`}</Text>
@@ -366,6 +392,12 @@ export const register: Register = on => {
             <Text color={l.color}>{label}</Text>
           </Button>
           <Text color={C.muted}>{`${' '.repeat(nameW - label.length + 1)}${fit(model, MODEL_W).padEnd(MODEL_W)} `}</Text>
+          {laneW > 0 && (
+            <Box key={`lane-${id}`}>
+              <Text color={l.color}>{run === undefined ? ' '.repeat(laneW) : lane(run[0], run[1], t0, t1, laneW)}</Text>
+            </Box>
+          )}
+          {laneW > 0 && <Text> </Text>}
           <Box key={`right-${id}`}>
             <Text color={l.color} inverse={isFlash}>
               {fit(l.right, RIGHT_W).padStart(RIGHT_W)}
@@ -392,7 +424,8 @@ export const register: Register = on => {
     }
 
     const main = { ...blank(now), isDone: true, ...stats[MAIN], model: await $.session.model() }
-    const out = rows(MAIN, MAIN, '', '', main, look('running', main, MAIN_COLD_MS))
+    const mainLook = look('running', main, MAIN_COLD_MS)
+    const out = rows(MAIN, MAIN, '', '', main, mainLook)
     const walk = (parent: string | undefined, pad: string) => {
       const shown = kids(parent).filter(a => !isHidden(a))
       shown.forEach((a, i) => {
@@ -403,6 +436,16 @@ export const register: Register = on => {
       })
     }
     walk(undefined, '')
+
+    // The diagram view: the same tree as boxes, its lines pulsing toward the working agents.
+    const node = (a: AgentInfo): Node => {
+      const l = looks.get(a.id) ?? look(a.status, stat(a.id), COLD_MS)
+      const under = kids(a.id).filter(k => !isHidden(k))
+      return { label: a.name ?? a.description, glyph: l.glyph, color: l.color, isLive: l.kind === 'working', kids: under.map(node) }
+    }
+    const top = kids(undefined).filter(a => !isHidden(a))
+    const root: Node = { label: MAIN, glyph: mainLook.glyph, color: mainLook.color, isLive: false, kids: top.map(node) }
+    const dg = v.diagram === true ? diagram(root, width, v.still ? undefined : Math.floor(now / FRAME_MS), C.muted, C.working) : undefined
 
     const counts = (['working', 'idle', 'failed', 'done'] as const)
       .map(kind => ({ kind, n: [...looks.values()].filter(l => l.kind === kind).length }))
@@ -419,8 +462,27 @@ export const register: Register = on => {
             <Text key={`count-${c.kind}`} color={color[c.kind]}>{`${i > 0 ? ' · ' : ''}${c.n} ${c.kind}`}</Text>
           ))}
         </Box>
-        {out}
-        {isStarred && (
+        {dg === undefined ? (
+          out
+        ) : (
+          <Box key="diagram" flexDirection="column">
+            {dg.rows.map((runs, y) => (
+              <Box key={`dg-${y}`} flexDirection="row">
+                {runs.map((r, i) => (
+                  <Box key={`dg-${y}-${i}`}>
+                    <Text color={r.color}>{r.text}</Text>
+                  </Box>
+                ))}
+              </Box>
+            ))}
+            {dg.isCut && (
+              <Box key="dg-cut">
+                <Text color={C.muted}>wider than the pane: drag it wider</Text>
+              </Box>
+            )}
+          </Box>
+        )}
+        {dg === undefined && isStarred && (
           <Box key="footnote">
             <Text color={C.muted}>* model set by mod: click the row for why</Text>
           </Box>
@@ -433,6 +495,10 @@ export const register: Register = on => {
             <Text>  </Text>
             <Button key="clear" plain hotkey="c" onPress={clear}>
               <Text color={C.text}>clear done</Text>
+            </Button>
+            <Text>  </Text>
+            <Button key="view" plain hotkey="v" onPress={() => void update($, view, w => ({ ...w, diagram: w.diagram !== true }))}>
+              <Text color={C.text}>{v.diagram === true ? 'lanes' : 'diagram'}</Text>
             </Button>
           </Box>
           <Box key="keys2" flexDirection="row">

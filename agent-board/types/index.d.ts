@@ -23,6 +23,8 @@ export type AgentStat = {
   // Time of the finished turns, plus the start of the one that runs now.
   ms: number
   since?: number
+  // When the board first saw the agent run: its spawn, else its first tool call. The time lanes start here.
+  start?: number
   // turn.complete's reason; the contract may not import, so the union is spelled here.
   end?: 'answer' | 'aborted' | 'refusal' | 'error'
   // When a tool call failed or the agent returned: the row flashes for a second.
@@ -31,9 +33,9 @@ export type AgentStat = {
   info?: { description: string; type: string; name?: string; parentId?: string }
 }
 
-// Which rows are expanded, whether returned agents hide, whether motion is off, and which returned agents `c` cleared.
-// `cleared` is absent from an older save of this mod.
-export type BoardView = { open: string[]; hideDone: boolean; still: boolean; cleared?: string[] }
+// Which rows are expanded, whether returned agents hide, whether motion is off, which returned agents `c` cleared,
+// and whether `v` shows the box diagram instead of the rows. `cleared` and `diagram` are absent from an older save.
+export type BoardView = { open: string[]; hideDone: boolean; still: boolean; cleared?: string[]; diagram?: boolean }
 
 declare module 'claude-code' {
   interface PluginState {
