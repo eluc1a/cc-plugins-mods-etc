@@ -1,0 +1,20 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "claude-mods",
+  "description": "elucia's Claude Code mods: context relay and a live agent board.",
+  "owner": {
+    "name": "elucia"
+  },
+  "plugins": [
+    {
+      "name": "relay",
+      "source": "./relay",
+      "description": "Past 180K context: soft stop, handoff, /clear, continue. Up to 5 cycles."
+    },
+    {
+      "name": "agent-board",
+      "source": "./agent-board",
+      "description": "/board pane: a live tree of this session's agents, plus the board-test skill that launches cheap Haiku agents to exercise it."
+    }
+  ]
+}
