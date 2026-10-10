@@ -20,6 +20,8 @@ const LAST_CALLS = 5
 const WIDTH = 46
 const MODEL_W = 9
 const RIGHT_W = 7
+// The engine draws a row's hotkey before its name (`1: `); a row past 9 has none and keeps the space.
+const KEY_W = 3
 // The time lanes take a third of a row past its fixed columns; under 6 cells they show nothing.
 const LANE_SHARE = 1 / 3
 const LANE_MIN = 6
@@ -374,17 +376,19 @@ export const register: Register = on => {
     // Text keeps no key, so each keyed piece sits in a Box of its own.
     // An agent's rows: the line itself, its current tool or idle note, and its details when expanded.
     // `pad` draws the tree in front of the line, `cont` the tree in front of the lines under it.
-    // `isNested`: the agent has a parent agent, so a message of its own to main skipped that parent.
-    const rows = (id: string, name: string, pad: string, cont: string, s: AgentStat, l: Look, isNested = false) => {
+    // `digit`: the key that expands the row. `isNested`: the agent has a parent agent, so a message of its own to main skipped that parent.
+    const rows = (id: string, name: string, pad: string, cont: string, s: AgentStat, l: Look, digit?: string, isNested = false) => {
       const isFlash = !v.still && s.flashAt !== undefined && now - s.flashAt < FLASH_MS
       const model = `${s.model?.replace(/^claude-/, '') ?? ''}${s.isStar === true ? '*' : ''}`
       const mark = s.isToMain === true ? '✉ ' : ''
-      const nameW = Math.max(4, width - pad.length - 3 - mark.length - MODEL_W - 1 - RIGHT_W - (laneW > 0 ? laneW + 1 : 0))
+      const nameW = Math.max(4, width - pad.length - 3 - KEY_W - mark.length - MODEL_W - 1 - RIGHT_W - (laneW > 0 ? laneW + 1 : 0))
       const label = fit(name, nameW)
       const run = spans.get(id)
-      const detail = (key: string, head: string, value: string, color: string = C.muted) => (
-        <Box key={key}>
-          <Text color={color} wrap="truncate-end">{`${cont}    ${head.padEnd(8)}${value}`}</Text>
+      // Dim labels, bright values.
+      const detail = (key: string, head: string, value: string, color: string = C.text) => (
+        <Box key={key} flexDirection="row">
+          <Text color={C.muted}>{`${cont}    ${head.padEnd(8)}`}</Text>
+          <Text color={color} wrap="truncate-end">{value}</Text>
         </Box>
       )
       const words = s.report
@@ -396,7 +400,8 @@ export const register: Register = on => {
             <Text color={l.color} inverse={isFlash} bold={isFlash}>{l.glyph}</Text>
           </Box>
           <Text> </Text>
-          <Button key={`open-${id}`} plain label={label} onPress={toggle(id)}>
+          {digit === undefined && <Text>{' '.repeat(KEY_W)}</Text>}
+          <Button key={`open-${id}`} plain hotkey={digit} label={label} onPress={toggle(id)}>
             {mark !== '' && <Text color={isNested ? C.soon : C.muted}>{mark}</Text>}
             <Text color={l.color}>{label}</Text>
           </Button>
@@ -426,7 +431,7 @@ export const register: Register = on => {
             {s.route !== undefined && detail(`route-${id}`, 'model', s.route)}
             {detail(`tokens-${id}`, 'tokens', s.tokens + s.cached > 0 ? `${kilo(s.tokens)} + ${kilo(s.cached)} cached` : '—')}
             {detail(`tools-${id}`, 'tools', `${s.tools}${s.fails > 0 ? `  ✗${s.fails}` : ''}`, s.fails > 0 ? C.failed : undefined)}
-            {l.cache !== undefined && detail(`cache-${id}`, 'cache', l.cache, l.noteColor)}
+            {l.cache !== undefined && detail(`cache-${id}`, 'cache', l.cache, l.noteColor === C.soon ? C.soon : undefined)}
             {words !== undefined &&
               detail(`report-${id}`, 'report', words === 0 ? 'none' : `${words} words${words > LONG_WORDS ? ' · long' : ''}`)}
             {s.last.map((c, i) => detail(`last-${id}-${i}`, i === 0 ? 'last' : '', `${c.label}${c.isError === true ? '  ✗' : ''}`, c.isError === true ? C.failed : undefined))}
@@ -437,14 +442,18 @@ export const register: Register = on => {
 
     const main = { ...blank(now), isDone: true, ...stats[MAIN], model: await $.session.model() }
     const mainLook = look('running', main, MAIN_COLD_MS)
-    const out = rows(MAIN, MAIN, '', '', main, mainLook)
+    const out = rows(MAIN, MAIN, '', '', main, mainLook, '0')
+    // Rows take the keys 1 to 9 in the order they show.
+    let n = 0
     const walk = (parent: string | undefined, pad: string) => {
       const shown = kids(parent).filter(a => !isHidden(a))
       shown.forEach((a, i) => {
         const isLast = i === shown.length - 1
         const cont = `${pad}${isLast ? '  ' : '│ '}`
         const l = looks.get(a.id) ?? look(a.status, stat(a.id), COLD_MS)
-        out.push(...rows(a.id, a.name ?? a.description, `${pad}${isLast ? '└ ' : '├ '}`, cont, stat(a.id), l, a.parentId !== undefined))
+        n += 1
+        const digit = n <= 9 ? String(n) : undefined
+        out.push(...rows(a.id, a.name ?? a.description, `${pad}${isLast ? '└ ' : '├ '}`, cont, stat(a.id), l, digit, a.parentId !== undefined))
         walk(a.id, cont)
       })
     }

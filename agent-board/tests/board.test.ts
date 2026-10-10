@@ -87,9 +87,11 @@ const mount = ($: Engine) => $.ui.mount({ plugin: 'agent-board', surface: 'termi
 // Only find: the terminal's and the desktop's drawings both have it.
 type Ui = Pick<Awaited<ReturnType<typeof mount>>, 'find'>
 const text = async (ui: Ui, key: string) => (await ui.find({ key }))?.text ?? ''
-// Text keeps no key: a keyed Box holds it, so its props are the Box's first child's.
-const prop = async (ui: Ui, key: string, name: string) =>
-  ((await ui.find({ key }))?.children[0] as { props?: Record<string, unknown> } | undefined)?.props?.[name]
+// Text keeps no key: a keyed Box holds it, so its props are the Box's first child's (or the i-th's).
+const prop = async (ui: Ui, key: string, name: string, i = 0) =>
+  ((await ui.find({ key }))?.children[i] as { props?: Record<string, unknown> } | undefined)?.props?.[name]
+// The engine draws a row's hotkey (`1: `) before its name, outside the tree's text.
+const KEY_W = 3
 
 test('Explore without a model gets haiku; every other spawn passes unchanged', async ($, on) => {
   const { seen } = world(on)
@@ -237,7 +239,7 @@ test('each line fits the dock and shows glyph, name, model and time on every sur
   for (const surface of ['terminal', 'desktop'] as const) {
     const ui = await $.ui.mount({ plugin: 'agent-board', surface, component: 'Pane', props: paneProps, requestId: 'agent-board' })
 
-    expect(await text(ui, 'row-a1')).toMatch(/^├ ✓ explore logs\s+haiku\*\s+━\s+0:00$/)
+    expect(await text(ui, 'row-a1')).toMatch(/^├ ✓ explore l…\s+haiku\*\s+━\s+0:00$/)
     expect(await text(ui, 'row-a2')).toMatch(/^├ ⠋ task two\s+opus\s+━{8}\s+6:00$/)
     expect(await text(ui, 'now-a2')).toContain('└ Bash: ls')
     expect(await text(ui, 'row-a3')).toMatch(/^└ ○ task three\s+sonnet/)
@@ -248,7 +250,7 @@ test('each line fits the dock and shows glyph, name, model and time on every sur
     expect(await prop(ui, 'right-a1', 'color')).toBe(PALETTE.done)
     expect(await prop(ui, 'right-a2', 'color')).toBe(PALETTE.working)
     for (const key of ['row-main', 'row-a1', 'row-a2', 'row-a3']) {
-      expect((await text(ui, key)).length <= WIDTH).toBe(true)
+      expect((await text(ui, key)).length + KEY_W <= WIDTH).toBe(true)
     }
     expect(await text(ui, 'summary')).toBe('1 working · 1 idle · 1 done')
     expect(await text(ui, 'footnote')).toBe('* model set by mod: click the row for why')
@@ -274,10 +276,30 @@ test('pressing a name expands its details and pressing again folds them', async 
   expect(await text(ui, 'report-a1')).toContain('120 words · long')
   expect(await text(ui, 'last-a1-0')).toContain('last    Read: register.tsx')
   expect(await text(ui, 'last-a1-1')).toContain('Bash: false  ✗')
-  expect(await prop(ui, 'last-a1-1', 'color')).toBe(PALETTE.failed)
+  expect(await prop(ui, 'last-a1-1', 'color', 1)).toBe(PALETTE.failed)
+  expect(await prop(ui, 'tokens-a1', 'color')).toBe(PALETTE.muted)
+  expect(await prop(ui, 'tokens-a1', 'color', 1)).toBe(PALETTE.text)
 
   await ui.press({ key: 'open-a1' })
   expect(await ui.find({ key: 'detail-a1' })).toBeUndefined()
+})
+
+test('keys 0 to 9 expand the rows in the order they show; the 11th row has no key and keeps its place', async ($, on) => {
+  const { agents } = world(on)
+  for (let i = 1; i <= 10; i++) {
+    agents.push(i === 2 ? { ...info('a2', 'child', 'running'), parentId: 'a1' } : info(`a${i}`, `agent ${i}`, 'running'))
+  }
+
+  const ui = await mount($)
+  const hotkey = async (id: string) => (await ui.find({ key: `open-${id}` }))?.props.hotkey
+  expect(await hotkey('main')).toBe('0')
+  expect(await hotkey('a1')).toBe('1')
+  expect(await hotkey('a2')).toBe('2')
+  expect(await hotkey('a9')).toBe('9')
+  expect(await hotkey('a10')).toBeUndefined()
+  expect(await text(ui, 'row-a10')).toMatch(/^└ \S {4}agent 10/)
+  await ui.press({ key: 'open-a9' })
+  expect(await ui.find({ key: 'detail-a9' })).toBeDefined()
 })
 
 test('the tree nests each agent under its parent, under main', async ($, on) => {
@@ -382,10 +404,10 @@ test('a message to main marks the row: muted from a child of main, yellow from a
   expect(await prop(ui, 'open-a1', 'color')).toBe(PALETTE.muted)
   expect(await text(ui, 'row-a2')).toMatch(/^  ├ \S ✉ skips/)
   expect(await prop(ui, 'open-a2', 'color')).toBe(PALETTE.soon)
-  expect(await text(ui, 'row-a3')).toMatch(/^  └ \S reports up/)
+  expect(await text(ui, 'row-a3')).toMatch(/^  └ \S reports…/)
   expect(await text(ui, 'skipnote')).toBe('✉ yellow: sent to main, not to its parent')
   for (const key of ['row-a1', 'row-a2', 'row-a3']) {
-    expect((await text(ui, key)).length <= WIDTH).toBe(true)
+    expect((await text(ui, key)).length + KEY_W <= WIDTH).toBe(true)
   }
 })
 
