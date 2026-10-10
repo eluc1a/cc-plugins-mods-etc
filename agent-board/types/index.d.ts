@@ -1,8 +1,8 @@
 // The state contract of the agent-board mod: one record per agent loop,
 // keyed by agentId, the main loop under 'main', and the board's own view.
 
-// One recent tool call of an agent, by its tool_use_id.
-export type Call = { id: string; label: string; isError?: boolean }
+// One recent tool call of an agent, by its tool_use_id: when it started, and when it returned.
+export type Call = { id: string; label: string; isError?: boolean; at?: number; end?: number }
 
 export type AgentStat = {
   model?: string

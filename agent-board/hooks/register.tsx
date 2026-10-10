@@ -47,7 +47,8 @@ let timer: Timer | undefined
 let spin: Timer | undefined
 
 type Kind = 'working' | 'idle' | 'done' | 'failed' | 'other'
-type Look = { kind: Kind; glyph: string; color: string; right: string; note?: string; noteColor?: string; cache?: string }
+// `wait`: how long the current tool call has run, while it runs.
+type Look = { kind: Kind; glyph: string; color: string; right: string; note?: string; noteColor?: string; cache?: string; wait?: string }
 
 const title = (count: number) => `Agents · ${count}`
 const blank = (at: number): AgentStat => ({ tools: 0, fails: 0, last: [], at, isDone: false, tokens: 0, cached: 0, ms: 0 })
@@ -244,19 +245,20 @@ export const register: Register = on => {
     await touch($, id, (s, at) => ({
       tools: s.tools + 1,
       tool: call.label,
-      last: [...s.last, call].slice(-LAST_CALLS),
+      last: [...s.last, { ...call, at }].slice(-LAST_CALLS),
       isDone: false,
       since: s.since ?? at,
       start: s.start ?? at,
     }))
     animate($)
     const ran = await next(e)
-    if (ran.deny !== undefined || ran.isError === true) {
-      await touch($, id, (s, at) => ({
-        fails: s.fails + 1,
-        flashAt: at,
-        last: s.last.map(c => (c.id === call.id ? { ...c, isError: true } : c)),
-      }))
+    const isFail = ran.deny !== undefined || ran.isError === true
+    // The return stops the call's clock; a failed one also counts and flashes.
+    await touch($, id, (s, at) => ({
+      last: s.last.map(c => (c.id === call.id ? { ...c, end: at, ...(isFail ? { isError: true } : {}) } : c)),
+      ...(isFail ? { fails: s.fails + 1, flashAt: at } : {}),
+    }))
+    if (isFail) {
       animate($)
     }
 
@@ -334,7 +336,9 @@ export const register: Register = on => {
       }
       if (status === 'running' && !isIdle) {
         const glyph = v.still ? '●' : (FRAMES[Math.floor(now / FRAME_MS) % FRAMES.length] ?? '●')
-        return { kind: 'working', glyph, color: C.working, right: time, note: s.tool, cache: 'warm' }
+        const call = s.last.at(-1)
+        const wait = s.tool !== undefined && call?.at !== undefined && call.end === undefined ? clock(now - call.at) : undefined
+        return { kind: 'working', glyph, color: C.working, right: time, note: s.tool, cache: 'warm', wait }
       }
       if (isIdle) {
         const color = left < SOON_MS ? C.soon : C.muted
@@ -406,7 +410,10 @@ export const register: Register = on => {
         </Box>,
         l.note !== undefined && (
           <Box key={`now-${id}`}>
-            <Text color={l.noteColor ?? C.muted} wrap="truncate-end">{`${cont}  └ ${l.note}`}</Text>
+            <Text color={l.noteColor ?? C.muted} wrap="truncate-end">
+              {/* The clock goes last, so the tool's name gives way to it. */}
+              {`${cont}  └ ${l.wait === undefined ? l.note : `${fit(l.note, width - cont.length - 7 - l.wait.length)} · ${l.wait}`}`}
+            </Text>
           </Box>
         ),
         v.open.includes(id) && (

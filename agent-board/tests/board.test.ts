@@ -47,13 +47,20 @@ function world(on: On) {
     return { type: 'engine', ref: 0 }
   })
   on('session.start', (_$, e) => ({ cwd: e.cwd }))
-  // A Bash call whose command is `false` fails, as the shell would.
-  on('tool.call', (_$, e) => (e.tool === 'Bash' && e.command === 'false' ? { result: 'exit 1', isError: true } : { result: 'ok' }))
+  // A Bash call whose command is `false` fails, as the shell would; one that starts `sleep` runs until `release()`.
+  let release = () => {}
+  const held = new Promise<void>(r => (release = r))
+  on('tool.call', async (_$, e) => {
+    if (e.tool === 'Bash' && e.command.startsWith('sleep')) {
+      await held
+    }
+    return e.tool === 'Bash' && e.command === 'false' ? { result: 'exit 1', isError: true } : { result: 'ok' }
+  })
   on('session.model', () => ({ value: 'claude-opus-5-5' }))
   on('turn.start', (_$, e) => ({ turnId: e.turnId }))
   on('turn.complete', (_$, e) => ({ text: e.answer }))
 
-  return { seen, agents, clock, panes }
+  return { seen, agents, clock, panes, release: () => release() }
 }
 
 // The engine's own $ takes the whole spawn input: fill what the Agent tool would.
@@ -334,6 +341,27 @@ test('the current tool names a file by its last segment', async ($, on) => {
 
   const ui = await mount($)
   expect(await text(ui, 'now-a1')).toMatch(/Read: register\.tsx$/)
+})
+
+test('a tool call shows its clock while it runs, cut so the clock fits; the clock goes when it returns', async ($, on) => {
+  const { agents, clock, release } = world(on)
+  await spawn($, { prompt: 'p' }) // a1
+  await spawn($, { prompt: 'p' }) // a2
+  agents.push(info('a1', 'short', 'running'), info('a2', 'long', 'running'))
+  const short = $.tool.call(inLoop('a1', { tool: 'Bash', command: 'sleep 90' } as const))
+  const long = $.tool.call(inLoop('a2', { tool: 'Bash', command: 'sleep 90 && echo a command too long for the dock' } as const))
+  await clock.set(42_000)
+
+  let ui = await mount($)
+  expect(await text(ui, 'now-a1')).toBe('│   └ Bash: sleep 90 · 0:42')
+  expect(await text(ui, 'now-a2')).toMatch(/^    └ Bash: sleep 90 && .*… · 0:42$/)
+  expect((await text(ui, 'now-a2')).length).toBe(WIDTH)
+  await ui.unmount()
+
+  release()
+  await Promise.all([short, long])
+  ui = await mount($)
+  expect(await text(ui, 'now-a1')).toBe('│   └ Bash: sleep 90')
 })
 
 test('main turns cache cold after an hour, a subagent after 5 minutes; the last minute is yellow', async ($, on) => {
