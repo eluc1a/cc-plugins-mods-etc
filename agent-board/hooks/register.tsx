@@ -33,7 +33,7 @@ const FRAMES = '⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
 export const PALETTE = { bg: '#141019', text: '#e6e1f2', muted: '#9d97b8', working: '#ffb055', done: '#8bd6a8', failed: '#ff8f9b', soon: '#f2d27a' } as const
 const C = PALETTE
 // The input fields that name what a tool call works on: the first one present wins.
-const BRIEF_KEYS = ['description', 'file_path', 'command', 'pattern', 'url', 'query', 'skill']
+const BRIEF_KEYS = ['description', 'file_path', 'command', 'pattern', 'url', 'query', 'skill', 'to']
 const ENDED: AgentStatus[] = ['completed', 'failed', 'killed']
 // Jev picks the model only for these types: a plugin's agent may set its own model in its definition.
 const ROUTED = ['Explore', 'general-purpose']
@@ -253,10 +253,12 @@ export const register: Register = on => {
     animate($)
     const ran = await next(e)
     const isFail = ran.deny !== undefined || ran.isError === true
+    const isToMain = !isFail && e.agentId !== undefined && e.tool === 'SendMessage' && e.to === MAIN
     // The return stops the call's clock; a failed one also counts and flashes.
     await touch($, id, (s, at) => ({
       last: s.last.map(c => (c.id === call.id ? { ...c, end: at, ...(isFail ? { isError: true } : {}) } : c)),
       ...(isFail ? { fails: s.fails + 1, flashAt: at } : {}),
+      ...(isToMain ? { isToMain: true } : {}),
     }))
     if (isFail) {
       animate($)
@@ -372,10 +374,12 @@ export const register: Register = on => {
     // Text keeps no key, so each keyed piece sits in a Box of its own.
     // An agent's rows: the line itself, its current tool or idle note, and its details when expanded.
     // `pad` draws the tree in front of the line, `cont` the tree in front of the lines under it.
-    const rows = (id: string, name: string, pad: string, cont: string, s: AgentStat, l: Look) => {
+    // `isNested`: the agent has a parent agent, so a message of its own to main skipped that parent.
+    const rows = (id: string, name: string, pad: string, cont: string, s: AgentStat, l: Look, isNested = false) => {
       const isFlash = !v.still && s.flashAt !== undefined && now - s.flashAt < FLASH_MS
       const model = `${s.model?.replace(/^claude-/, '') ?? ''}${s.isStar === true ? '*' : ''}`
-      const nameW = Math.max(4, width - pad.length - 3 - MODEL_W - 1 - RIGHT_W - (laneW > 0 ? laneW + 1 : 0))
+      const mark = s.isToMain === true ? '✉ ' : ''
+      const nameW = Math.max(4, width - pad.length - 3 - mark.length - MODEL_W - 1 - RIGHT_W - (laneW > 0 ? laneW + 1 : 0))
       const label = fit(name, nameW)
       const run = spans.get(id)
       const detail = (key: string, head: string, value: string, color: string = C.muted) => (
@@ -393,6 +397,7 @@ export const register: Register = on => {
           </Box>
           <Text> </Text>
           <Button key={`open-${id}`} plain label={label} onPress={toggle(id)}>
+            {mark !== '' && <Text color={isNested ? C.soon : C.muted}>{mark}</Text>}
             <Text color={l.color}>{label}</Text>
           </Button>
           <Text color={C.muted}>{`${' '.repeat(nameW - label.length + 1)}${fit(model, MODEL_W).padEnd(MODEL_W)} `}</Text>
@@ -438,7 +443,8 @@ export const register: Register = on => {
       shown.forEach((a, i) => {
         const isLast = i === shown.length - 1
         const cont = `${pad}${isLast ? '  ' : '│ '}`
-        out.push(...rows(a.id, a.name ?? a.description, `${pad}${isLast ? '└ ' : '├ '}`, cont, stat(a.id), looks.get(a.id) ?? look(a.status, stat(a.id), COLD_MS)))
+        const l = looks.get(a.id) ?? look(a.status, stat(a.id), COLD_MS)
+        out.push(...rows(a.id, a.name ?? a.description, `${pad}${isLast ? '└ ' : '├ '}`, cont, stat(a.id), l, a.parentId !== undefined))
         walk(a.id, cont)
       })
     }
@@ -459,6 +465,7 @@ export const register: Register = on => {
       .filter(c => c.n > 0)
     const color = { working: C.working, idle: C.muted, failed: C.failed, done: C.done }
     const isStarred = list.some(a => stats[a.id]?.isStar === true)
+    const isSkipped = list.some(a => a.parentId !== undefined && stats[a.id]?.isToMain === true && !isHidden(a))
 
     // Docked, the color fills the whole body; inline, the frame fits the tree.
     return (
@@ -492,6 +499,11 @@ export const register: Register = on => {
         {dg === undefined && isStarred && (
           <Box key="footnote">
             <Text color={C.muted}>* model set by mod: click the row for why</Text>
+          </Box>
+        )}
+        {dg === undefined && isSkipped && (
+          <Box key="skipnote">
+            <Text color={C.soon}>✉ yellow: sent to main, not to its parent</Text>
           </Box>
         )}
         <Box key="footer" flexDirection="column">

@@ -29,6 +29,8 @@ export type AgentStat = {
   end?: 'answer' | 'aborted' | 'refusal' | 'error'
   // When a tool call failed or the agent returned: the row flashes for a second.
   flashAt?: number
+  // The agent sent a message to main: its row shows ✉, yellow when the agent is nested and so skipped its parent.
+  isToMain?: boolean
   // The agent's list entry, kept so its row outlives the engine's task.
   info?: { description: string; type: string; name?: string; parentId?: string }
 }

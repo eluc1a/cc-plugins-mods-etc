@@ -364,6 +364,31 @@ test('a tool call shows its clock while it runs, cut so the clock fits; the cloc
   expect(await text(ui, 'now-a1')).toBe('│   └ Bash: sleep 90')
 })
 
+test('a message to main marks the row: muted from a child of main, yellow from a nested agent', async ($, on) => {
+  const { agents } = world(on)
+  agents.push(
+    info('a1', 'parent', 'running'),
+    { ...info('a2', 'skips', 'running'), parentId: 'a1' },
+    { ...info('a3', 'reports up', 'running'), parentId: 'a1' },
+  )
+  await $.tool.call(inLoop('a1', { tool: 'SendMessage', to: 'main', message: 'P1: done' } as const))
+  await $.tool.call(inLoop('a2', { tool: 'SendMessage', to: 'main', message: 'P1.a: done' } as const))
+  await $.tool.call(inLoop('a3', { tool: 'SendMessage', to: 'a1', message: 'P1.b: done' } as const))
+
+  const ui = await mount($)
+  expect(await text(ui, 'now-a1')).toContain('└ SendMessage: main')
+  expect(await text(ui, 'now-a3')).toContain('└ SendMessage: a1')
+  expect(await text(ui, 'row-a1')).toMatch(/^└ \S ✉ parent/)
+  expect(await prop(ui, 'open-a1', 'color')).toBe(PALETTE.muted)
+  expect(await text(ui, 'row-a2')).toMatch(/^  ├ \S ✉ skips/)
+  expect(await prop(ui, 'open-a2', 'color')).toBe(PALETTE.soon)
+  expect(await text(ui, 'row-a3')).toMatch(/^  └ \S reports up/)
+  expect(await text(ui, 'skipnote')).toBe('✉ yellow: sent to main, not to its parent')
+  for (const key of ['row-a1', 'row-a2', 'row-a3']) {
+    expect((await text(ui, key)).length <= WIDTH).toBe(true)
+  }
+})
+
 test('main turns cache cold after an hour, a subagent after 5 minutes; the last minute is yellow', async ($, on) => {
   const { agents, clock } = world(on)
   await spawn($, { prompt: 'p' }) // a1
