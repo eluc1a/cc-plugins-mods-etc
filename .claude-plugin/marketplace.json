@@ -9,7 +9,7 @@
     {
       "name": "relay",
       "source": "./relay",
-      "description": "Past 180K context: soft stop, handoff, /clear, continue. Up to 5 cycles."
+      "description": "Past 180K context: soft stop, handoff, /clear, continue. Up to 10 cycles."
     },
     {
       "name": "agent-board",
