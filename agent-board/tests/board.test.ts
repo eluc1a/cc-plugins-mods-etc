@@ -4,7 +4,7 @@ import type { AgentInfo, AgentSpawnArgs, AgentStatus, On, PaneOpenArgs } from 'c
 
 import { diagram } from '../hooks/diagram'
 import type { Node } from '../hooks/diagram'
-import { PALETTE } from '../hooks/register'
+import { PALETTE, short } from '../hooks/register'
 import { JEV_MODEL, JEV_URL, pick, question } from '../hooks/route'
 
 const words = (n: number) => Array.from({ length: n }, () => 'word').join(' ')
@@ -195,9 +195,9 @@ test('the expanded row says who picked the model and why', async ($, on) => {
   const ui = await mount($)
   await ui.press({ key: 'open-a1' })
   await ui.press({ key: 'open-a2' })
-  expect(await text(ui, 'route-a1')).toContain('model   jev sonnet at 0.87')
-  expect(await text(ui, 'route-a2')).toContain('model   haiku, jev: http 529')
-  expect(await text(ui, 'row-a1')).toMatch(/sonnet\*/)
+  expect(await text(ui, 'model-a1')).toContain('model   sonnet · jev sonnet at 0.87')
+  expect(await text(ui, 'model-a2')).toContain('model   haiku · haiku, jev: http 529')
+  expect(await text(ui, 'meta-a1')).toMatch(/^│   sonnet\*/)
   await ui.unmount()
 })
 
@@ -222,7 +222,7 @@ test('/board registers at session start and opens the pane at the narrow width',
   expect(seen.opened.map(o => [o.id, o.title, o.columns])).toEqual([['agent-board', 'Agents · 2', 46]])
 })
 
-test('each line fits the dock and shows glyph, name, model and time on every surface', async ($, on) => {
+test('each agent of main gets a card that fills the dock: glyph, name and time, then model and lane', async ($, on) => {
   const { agents, clock } = world(on)
   await spawn($, { prompt: 'p', subagentType: 'Explore', description: 'explore logs' }) // a1: haiku*
   await spawn($, { prompt: 'p', model: 'opus' }) // a2
@@ -239,18 +239,29 @@ test('each line fits the dock and shows glyph, name, model and time on every sur
   for (const surface of ['terminal', 'desktop'] as const) {
     const ui = await $.ui.mount({ plugin: 'agent-board', surface, component: 'Pane', props: paneProps, requestId: 'agent-board' })
 
-    expect(await text(ui, 'row-a1')).toMatch(/^├ ✓ explore l…\s+haiku\*\s+━\s+0:00$/)
-    expect(await text(ui, 'row-a2')).toMatch(/^├ ⠋ task two\s+opus\s+━{8}\s+6:00$/)
-    expect(await text(ui, 'now-a2')).toContain('└ Bash: ls')
-    expect(await text(ui, 'row-a3')).toMatch(/^└ ○ task three\s+sonnet/)
+    expect(await text(ui, 'row-main')).toMatch(/^○ main   opus 5\.5\s+$/)
+    expect(await text(ui, 'title-a1')).toMatch(/^╭─ done ─+╮$/)
+    expect(await text(ui, 'row-a1')).toMatch(/^│ ✓ explore logs\s+0:00 │$/)
+    expect(await text(ui, 'meta-a1')).toMatch(/^│   haiku\*\s+━\s+│$/)
+    expect(await text(ui, 'row-a2')).toMatch(/^│ ⠋ task two\s+6:00 │$/)
+    expect(await text(ui, 'meta-a2')).toMatch(/^│   opus\s+━{26} │$/)
+    expect(await text(ui, 'now-a2')).toMatch(/^│   └ Bash: ls\s+│$/)
+    expect(await text(ui, 'row-a3')).toMatch(/^│ ○ task three\s+/)
+    expect(await text(ui, 'meta-a3')).toMatch(/^│   sonnet\s/)
+    expect(await text(ui, 'end-a3')).toBe(`╰${'─'.repeat(WIDTH - 2)}╯`)
     expect(await text(ui, 'now-a3')).toContain('idle · cache cold')
     expect(await prop(ui, 'glyph-a1', 'color')).toBe(PALETTE.done)
     expect(await prop(ui, 'glyph-a2', 'color')).toBe(PALETTE.working)
     expect(await prop(ui, 'glyph-a3', 'color')).toBe(PALETTE.soon)
     expect(await prop(ui, 'right-a1', 'color')).toBe(PALETTE.done)
     expect(await prop(ui, 'right-a2', 'color')).toBe(PALETTE.working)
-    for (const key of ['row-main', 'row-a1', 'row-a2', 'row-a3']) {
-      expect((await text(ui, key)).length + KEY_W <= WIDTH).toBe(true)
+    for (const key of ['row-main', 'title-a1', 'title-a2', 'title-a3']) {
+      expect((await text(ui, key)).length + KEY_W).toBe(WIDTH)
+    }
+    for (const id of ['a1', 'a2', 'a3']) {
+      for (const key of [`row-${id}`, `meta-${id}`, `now-${id}`, `end-${id}`]) {
+        expect([key, (await text(ui, key)).length]).toEqual([key, (await ui.find({ key })) === undefined ? 0 : WIDTH])
+      }
     }
     expect(await text(ui, 'summary')).toBe('1 working · 1 idle · 1 done')
     expect(await text(ui, 'footnote')).toBe('* model set by mod: click the row for why')
@@ -284,26 +295,33 @@ test('pressing a name expands its details and pressing again folds them', async 
   expect(await ui.find({ key: 'detail-a1' })).toBeUndefined()
 })
 
-test('keys 0 to 9 expand the rows in the order they show; the 11th row has no key and keeps its place', async ($, on) => {
+test('keys 1 to 9 go to the cards in the order they show; an agent inside a card and the 10th card get none', async ($, on) => {
   const { agents } = world(on)
-  for (let i = 1; i <= 10; i++) {
+  for (let i = 1; i <= 11; i++) {
     agents.push(i === 2 ? { ...info('a2', 'child', 'running'), parentId: 'a1' } : info(`a${i}`, `agent ${i}`, 'running'))
   }
 
   const ui = await mount($)
-  const hotkey = async (id: string) => (await ui.find({ key: `open-${id}` }))?.props.hotkey
-  expect(await hotkey('main')).toBe('0')
+  expect((await ui.find({ key: 'open-main' }))?.props.hotkey).toBe('0')
+  const hotkey = async (id: string) => (await ui.find({ key: `key-${id}` }))?.props.hotkey
   expect(await hotkey('a1')).toBe('1')
-  expect(await hotkey('a2')).toBe('2')
-  expect(await hotkey('a9')).toBe('9')
-  expect(await hotkey('a10')).toBeUndefined()
-  expect(await text(ui, 'row-a10')).toMatch(/^└ \S {4}agent 10/)
-  await ui.press({ key: 'open-a9' })
-  expect(await ui.find({ key: 'detail-a9' })).toBeDefined()
+  expect(await hotkey('a2')).toBeUndefined()
+  expect(await hotkey('a3')).toBe('2')
+  expect(await hotkey('a10')).toBe('9')
+  expect(await hotkey('a11')).toBeUndefined()
+  expect(await text(ui, 'title-a11')).toMatch(/^╭─ working ─+╮$/)
+  expect((await text(ui, 'title-a11')).length).toBe(WIDTH)
+  await ui.press({ key: 'key-a10' })
+  expect(await ui.find({ key: 'detail-a10' })).toBeDefined()
+  await ui.press({ key: 'open-a2' })
+  expect(await ui.find({ key: 'detail-a2' })).toBeDefined()
 })
 
-test('the tree nests each agent under its parent, under main', async ($, on) => {
+test('an agent sits inside the card of its parent; an agent whose parent left gets a card', async ($, on) => {
   const { agents } = world(on)
+  for (let i = 0; i < 4; i++) {
+    await spawn($, { prompt: 'p' }) // a1 to a4: sonnet, each with its lane
+  }
   agents.push(
     { ...info('a1', 'research', 'running'), name: 'research' },
     { ...info('a2', 'scan', 'running'), parentId: 'a1' },
@@ -312,11 +330,18 @@ test('the tree nests each agent under its parent, under main', async ($, on) => 
   )
 
   const ui = await mount($)
-  expect(await text(ui, 'row-main')).toMatch(/^○ main\s+opus-5-5/)
-  expect(await text(ui, 'row-a1')).toMatch(/^├ \S research/)
-  expect(await text(ui, 'row-a2')).toMatch(/^│ └ \S scan/)
-  expect(await text(ui, 'row-a3')).toMatch(/^├ \S build/)
-  expect(await text(ui, 'row-a4')).toMatch(/^└ \S orphan/)
+  expect(await text(ui, 'row-main')).toMatch(/^○ main\s+opus\s/)
+  expect(await text(ui, 'title-a1')).toMatch(/^╭─ working · 1 agent inside ─+╮$/)
+  expect(await text(ui, 'row-a1')).toMatch(/^│ \S research/)
+  expect(await text(ui, 'gap-a1')).toMatch(/^│\s+│$/)
+  expect(await text(ui, 'row-a2')).toMatch(/^│   └ \S scan/)
+  expect(await text(ui, 'meta-a2')).toMatch(/^│       sonnet\s/)
+  expect(await ui.find({ key: 'card-a2' })).toBeUndefined()
+  expect(await text(ui, 'row-a3')).toMatch(/^│ \S build/)
+  expect(await text(ui, 'row-a4')).toMatch(/^│ \S orphan/)
+  // One lane column for every card, past the nested model.
+  expect((await text(ui, 'meta-a3')).indexOf('━')).toBeGreaterThan(0)
+  expect((await text(ui, 'meta-a3')).indexOf('━')).toBe((await text(ui, 'meta-a2')).indexOf('━'))
 })
 
 test('rows show the current tool while working; a failed call flashes for a second', async ($, on) => {
@@ -362,7 +387,7 @@ test('the current tool names a file by its last segment', async ($, on) => {
   await $.tool.call(inLoop('a1', { tool: 'Read', file_path: '/repo/hooks/register.tsx' } as const))
 
   const ui = await mount($)
-  expect(await text(ui, 'now-a1')).toMatch(/Read: register\.tsx$/)
+  expect(await text(ui, 'now-a1')).toMatch(/Read: register\.tsx\s+│$/)
 })
 
 test('a tool call shows its clock while it runs, cut so the clock fits; the clock goes when it returns', async ($, on) => {
@@ -375,18 +400,18 @@ test('a tool call shows its clock while it runs, cut so the clock fits; the cloc
   await clock.set(42_000)
 
   let ui = await mount($)
-  expect(await text(ui, 'now-a1')).toBe('│   └ Bash: sleep 90 · 0:42')
-  expect(await text(ui, 'now-a2')).toMatch(/^    └ Bash: sleep 90 && .*… · 0:42$/)
+  expect(await text(ui, 'now-a1')).toMatch(/^│   └ Bash: sleep 90 · 0:42\s+│$/)
+  expect(await text(ui, 'now-a2')).toMatch(/^│   └ Bash: sleep 90 && .*… · 0:42 │$/)
   expect((await text(ui, 'now-a2')).length).toBe(WIDTH)
   await ui.unmount()
 
   release()
   await Promise.all([short, long])
   ui = await mount($)
-  expect(await text(ui, 'now-a1')).toBe('│   └ Bash: sleep 90')
+  expect(await text(ui, 'now-a1')).toMatch(/^│   └ Bash: sleep 90\s+│$/)
 })
 
-test('a message to main marks the row: muted from a child of main, yellow from a nested agent', async ($, on) => {
+test('a message to main shows in the card title from an agent of main, and yellow on the name of a nested agent', async ($, on) => {
   const { agents } = world(on)
   agents.push(
     info('a1', 'parent', 'running'),
@@ -400,14 +425,15 @@ test('a message to main marks the row: muted from a child of main, yellow from a
   const ui = await mount($)
   expect(await text(ui, 'now-a1')).toContain('└ SendMessage: main')
   expect(await text(ui, 'now-a3')).toContain('└ SendMessage: a1')
-  expect(await text(ui, 'row-a1')).toMatch(/^└ \S ✉ parent/)
-  expect(await prop(ui, 'open-a1', 'color')).toBe(PALETTE.muted)
-  expect(await text(ui, 'row-a2')).toMatch(/^  ├ \S ✉ skips/)
+  expect(await text(ui, 'title-a1')).toMatch(/^╭─ working · 2 agents inside · ✉.*╮$/)
+  expect(await text(ui, 'row-a1')).toMatch(/^│ \S parent/)
+  expect(await text(ui, 'row-a2')).toMatch(/^│   ├ \S ✉ skips/)
   expect(await prop(ui, 'open-a2', 'color')).toBe(PALETTE.soon)
-  expect(await text(ui, 'row-a3')).toMatch(/^  └ \S reports…/)
+  expect(await text(ui, 'row-a3')).toMatch(/^│   └ \S reports up/)
   expect(await text(ui, 'skipnote')).toBe('✉ yellow: sent to main, not to its parent')
+  expect((await text(ui, 'title-a1')).length + KEY_W).toBe(WIDTH)
   for (const key of ['row-a1', 'row-a2', 'row-a3']) {
-    expect((await text(ui, key)).length + KEY_W <= WIDTH).toBe(true)
+    expect((await text(ui, key)).length).toBe(WIDTH)
   }
 })
 
@@ -448,14 +474,14 @@ test('time runs while an agent works and holds the turn time after', async ($, o
   await clock.set(30_000)
 
   let ui = await mount($)
-  expect(await text(ui, 'row-a1')).toMatch(/one.*0:30$/)
+  expect(await text(ui, 'row-a1')).toMatch(/one.*0:30 │$/)
   await ui.unmount()
 
   await $.turn.complete({ ...finish('a1', 'ok'), durationMs: 45_000 })
   agents.splice(0, 1, info('a1', 'one', 'completed'))
   await clock.set(90_000)
   ui = await mount($)
-  expect(await text(ui, 'row-a1')).toMatch(/✓ one.*0:45$/)
+  expect(await text(ui, 'row-a1')).toMatch(/✓ one.*0:45 │$/)
 })
 
 test('a bad end shows its reason in red; pending, waiting and idle show no ✗', async ($, on) => {
@@ -474,9 +500,11 @@ test('a bad end shows its reason in red; pending, waiting and idle show no ✗',
   )
 
   const ui = await mount($)
-  expect(await text(ui, 'row-a1')).toMatch(/✗ err.*error$/)
-  expect(await text(ui, 'row-a2')).toMatch(/✗ stop.*aborted$/)
-  expect(await text(ui, 'row-a3')).toMatch(/✗ gone.*killed$/)
+  expect(await text(ui, 'row-a1')).toMatch(/✗ err.*error │$/)
+  expect(await text(ui, 'row-a2')).toMatch(/✗ stop.*aborted │$/)
+  expect(await text(ui, 'row-a3')).toMatch(/✗ gone.*killed │$/)
+  expect(await text(ui, 'title-a1')).toMatch(/^╭─ failed /)
+  expect(await text(ui, 'title-a4')).toMatch(/^╭─ pending /)
   expect(await prop(ui, 'right-a1', 'color')).toBe(PALETTE.failed)
   expect(await text(ui, 'summary')).toBe('1 idle · 3 failed')
   for (const [id, word] of [['t1', 'idle'], ['a4', 'pending'], ['a5', 'waiting']] as const) {
@@ -522,7 +550,7 @@ test('a returned agent keeps its row after the engine drops it; c clears returne
 
   const ui = await mount($)
   expect(await text(ui, 'row-a1')).toMatch(/✓ returned/)
-  expect(await text(ui, 'row-a2')).toMatch(/✗ broke.*error$/)
+  expect(await text(ui, 'row-a2')).toMatch(/✗ broke.*error │$/)
   await ui.press({ key: 'clear' })
   expect(await ui.find({ key: 'row-a1' })).toBeUndefined()
   expect(await ui.find({ key: 'row-a5' })).toBeUndefined()
@@ -624,15 +652,14 @@ test('each lane puts its agent on one time axis, in the color of its status', as
   await clock.set(60_000)
 
   const ui = await mount($)
-  expect(await text(ui, 'lane-a1')).toMatch(/^━{4}\s*$/)
-  expect(await text(ui, 'lane-a2')).toMatch(/^\s*━{4}$/)
-  expect((await text(ui, 'lane-a2')).length).toBe(8)
-  expect(await text(ui, 'lane-main')).toMatch(/^\s*$/)
+  expect(await text(ui, 'lane-a1')).toBe(`${'━'.repeat(13)}${' '.repeat(13)}`)
+  expect(await text(ui, 'lane-a2')).toBe(`${' '.repeat(13)}${'━'.repeat(13)}`)
+  expect(await ui.find({ key: 'lane-main' })).toBeUndefined()
   expect(await prop(ui, 'lane-a1', 'color')).toBe(PALETTE.done)
   expect(await prop(ui, 'lane-a2', 'color')).toBe(PALETTE.working)
 })
 
-test('v swaps the rows for the box diagram and back; the boxes nest under main', async ($, on) => {
+test('v swaps the rows for the box diagram and back; the boxes branch right from main', async ($, on) => {
   const { agents } = world(on)
   agents.push({ ...info('a1', 'research', 'running'), name: 'research' }, { ...info('a2', 'scan', 'running'), parentId: 'a1' }, info('a3', 'build', 'completed'))
 
@@ -641,11 +668,13 @@ test('v swaps the rows for the box diagram and back; the boxes nest under main',
   await ui.press({ key: 'view' })
   expect(await ui.find({ key: 'row-a1' })).toBeUndefined()
   expect(await ui.find({ key: 'footnote' })).toBeUndefined()
-  expect(await text(ui, 'view')).toBe('lanes')
-  const lines = await Promise.all(Array.from({ length: 13 }, (_, y) => text(ui, `dg-${y}`)))
-  expect(lines[1]).toContain('main')
-  expect(lines[6]).toMatch(/research.*build/)
-  expect(lines[11]).toContain('scan')
+  expect(await text(ui, 'view')).toBe('list')
+  // Three levels in 44: boxes of 12, so "research" breaks; build sits under research's box.
+  const lines = await Promise.all(Array.from({ length: 11 }, (_, y) => text(ui, `dg-${y}`)))
+  expect(lines[1]).toMatch(/main.*resear.*scan/)
+  expect(lines[2]).toContain('opus')
+  expect(lines[7]).toContain('build')
+  expect(await ui.find({ key: 'dg-11' })).toBeUndefined()
   for (const l of lines) {
     expect(l.length <= WIDTH).toBe(true)
   }
@@ -654,8 +683,66 @@ test('v swaps the rows for the box diagram and back; the boxes nest under main',
   expect(await ui.find({ key: 'row-a1' })).toBeDefined()
 })
 
-const leaf = (label: string, isLive: boolean): Node => ({ label, glyph: '·', color: 'c', isLive, kids: [] })
-const tree = (...kids: Node[]): Node => ({ label: 'main', glyph: '○', color: 'c', isLive: false, kids })
+test('a lane keeps its agents together under one heading, with the branch of an agent that runs in its own directory', async ($, on) => {
+  const { agents } = world(on)
+  const runs: { argv: readonly string[]; cwd?: string }[] = []
+  on('session.cwd', () => ({ value: '/repo' }))
+  on('process.run', (_$, e) => {
+    runs.push({ argv: e.argv, cwd: e.init?.cwd })
+    return { value: { exitCode: 0, stdout: 'feat-x\n', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+  })
+  // The review starts after Lane 2, yet sits with Lane 1's implement.
+  agents.push(info('a1', 'Lane 1: implement acc-vc9', 'completed'), info('a2', 'lane 2: write plan', 'running'), info('a3', 'Lane 1: review', 'running'))
+  agents.push(info('a4', 'scan', 'running'))
+  await spawn($, { prompt: 'p', cwd: '/repo/.worktrees/feat-x' })
+  await spawn($, { prompt: 'p', cwd: '/repo' })
+  await spawn($, { prompt: 'p' })
+  await spawn($, { prompt: 'p' })
+  expect(runs).toEqual([{ argv: ['git', 'branch', '--show-current'], cwd: '/repo/.worktrees/feat-x' }])
+
+  const ui = await mount($)
+  const hotkey = async (id: string) => (await ui.find({ key: `key-${id}` }))?.props.hotkey
+  expect([await hotkey('a1'), await hotkey('a3'), await hotkey('a2'), await hotkey('a4')]).toEqual(['1', '2', '3', '4'])
+  expect(await text(ui, 'heading-a1')).toBe('Lane 1 · feat-x')
+  expect(await ui.find({ key: 'heading-a3' })).toBeUndefined()
+  expect(await text(ui, 'heading-a2')).toBe('Lane 2')
+  expect(await ui.find({ key: 'heading-a4' })).toBeUndefined()
+  expect(await text(ui, 'open-a1')).toBe('implement acc-vc9')
+  expect(await text(ui, 'open-a4')).toBe('scan')
+
+  await ui.press({ key: 'view' })
+  expect(await text(ui, 'dg-0')).toContain('Lane 1 · feat-x')
+  expect(await text(ui, 'dg-2')).toMatch(/main.*implement/)
+})
+
+test("a worktree agent's branch heads its lane, from git's list of worktrees at the agent's first tool call", async ($, on) => {
+  const { agents } = world(on)
+  const runs: string[] = []
+  on('session.cwd', () => ({ value: '/repo' }))
+  on('process.run', (_$, e) => {
+    runs.push(`${e.argv.join(' ')} in ${e.init?.cwd}`)
+    const stdout = [
+      'worktree /repo\nHEAD 1\nbranch refs/heads/main',
+      'worktree /repo/.claude/worktrees/agent-a10\nHEAD 2\nbranch refs/heads/other',
+      'worktree /repo/.claude/worktrees/agent-a1\nHEAD 3\nbranch refs/heads/worktree-agent-a1',
+    ].join('\n\n')
+    return { value: { exitCode: 0, stdout: `${stdout}\n`, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+  })
+  agents.push(info('a1', 'Lane 1: implement', 'running'), info('a2', 'Lane 2: write', 'running'))
+  await $.tool.call(call('a1'))
+  await $.tool.call(call('a1'))
+  await $.tool.call(call('a2'))
+  // Once per agent, whether or not it has a worktree.
+  expect(runs).toEqual(['git worktree list --porcelain in /repo', 'git worktree list --porcelain in /repo'])
+
+  const ui = await mount($)
+  expect(await text(ui, 'heading-a1')).toBe('Lane 1 · worktree-agent-a1')
+  expect(await text(ui, 'heading-a2')).toBe('Lane 2')
+})
+
+const leaf = (label: string, isLive: boolean): Node => ({ label, glyph: '·', color: 'c', meta: 'haiku · 0:12', isLive, kids: [] })
+const tree = (...kids: Node[]): Node => ({ label: 'main', glyph: '○', color: 'c', meta: 'opus · 1:00', isLive: false, kids })
+const row = (rows: { text: string }[][], y: number) => (rows[y] ?? []).map(r => r.text).join('')
 // The lit cells of a diagram, as "row:column".
 const lit = (rows: { text: string; color: string }[][]) =>
   rows.flatMap((runs, y) => {
@@ -664,34 +751,70 @@ const lit = (rows: { text: string; color: string }[][]) =>
   })
 
 test('a line toward a working agent pulses away from main, one cell a frame; motion off holds the path lit', () => {
-  // Two boxes of 16 under main: 33 columns, centered in 44 from column 5; main's center is column 21.
+  // Boxes of 20 in 44: main in columns 0-19, the children from column 23, the done box in rows 0-4, the live
+  // box in rows 6-10. Main's stub is column 20, the bus column 21 from row 2 to row 8, the live box's joint 8:23.
   const root = tree(leaf('done', false), leaf('live', true))
   const at = (frame: number | undefined) => diagram(root, 44, frame, 'line', 'pulse').rows
 
-  expect(lit(at(0))).toEqual(['3:21', '4:24', '4:28'])
-  expect(lit(at(1))).toEqual(['4:21', '4:25', '4:29'])
-  expect([...(at(0)[4] ?? []).map(r => r.text).join('')][24]).toBe('━')
+  expect(lit(at(0))).toEqual(['2:20', '5:21', '8:22'])
+  expect(lit(at(1))).toEqual(['2:21', '6:21', '8:23'])
+  expect([...row(at(0), 5)][21]).toBe('┃')
 
-  // Motion off: the stub, the bus from main's center to the live box, and its joint, all lit; none toward the done box.
+  // Motion off: the stub, the bus down to the live box, and its joint, all lit; none toward the done box.
   const still = lit(at(undefined))
-  expect(still).toContain('3:21')
-  expect(still).toContain('5:30')
-  expect(still.filter(c => c.startsWith('4:')).length).toBe(10)
-  expect(still.some(c => c.startsWith('4:') && Number(c.split(':')[1]) < 21)).toBe(false)
+  expect(still).toContain('2:20')
+  expect(still).toContain('8:23')
+  expect(still.filter(c => c.endsWith(':21')).length).toBe(7)
+  expect(still).not.toContain('2:22')
 })
 
-test('a wide tree narrows its boxes to fit the pane, then cuts at its edge', () => {
+test('a box holds the name in up to two lines and the model and time under it', () => {
+  const rows = diagram(tree(leaf('Verify Snowflake Cortex capabilities', false)), 60, 0, 'line', 'pulse').rows
+  // Two boxes of 24 side by side, joined at their middle row.
+  expect(row(rows, 1).trim()).toBe('│ ○ main               │   │ · Verify Snowflake   │')
+  expect(row(rows, 2).trim()).toBe('│   opus · 1:00        ├───┤   Cortex capabiliti… │')
+  expect(row(rows, 3).trim()).toBe('│                      │   │   haiku · 0:12       │')
+})
+
+test('a lane heading sits over its first box, and the parent stays level with that box', () => {
+  const rows = diagram(tree({ ...leaf('implement', false), title: 'Lane 1 · feat-x' }, leaf('review', false), { ...leaf('write', false), title: 'Lane 2' }), 44, 0, 'line', 'pulse').rows
+  // Boxes of 20: the children from column 23, the bus in column 21. Heading, box, gap, box, gap, heading, box.
+  expect(rows.length).toBe(1 + 5 + 1 + 5 + 1 + 1 + 5)
+  expect(row(rows, 0).trim()).toBe('Lane 1 · feat-x')
+  expect(row(rows, 1)).toMatch(/^╭─+╮   ╭─+╮$/)
+  expect(row(rows, 3)).toContain('├─┬─┤')
+  expect(row(rows, 9)).toContain('├─┤')
+  expect(row(rows, 13).trimEnd()).toBe(`${' '.repeat(21)}│ Lane 2`)
+  expect(row(rows, 16)).toContain('└─┤')
+})
+
+test('a wide tree grows down; a deep tree narrows its boxes to fit the pane, then cuts at its edge', () => {
   const kids = (n: number) => Array.from({ length: n }, (_, i) => leaf(`agent ${i}`, false))
+  const chain = (n: number): Node => (n === 0 ? leaf('end', false) : { ...leaf(`level ${n}`, false), kids: [chain(n - 1)] })
   const width = (rows: { text: string }[][]) => Math.max(...rows.map(r => r.map(x => x.text).join('').length))
 
-  const fits = diagram(tree(...kids(4)), 44, 0, 'line', 'pulse')
+  const wide = diagram(tree(...kids(8)), 44, 0, 'line', 'pulse')
+  expect(wide.isCut).toBe(false)
+  expect(wide.rows.length).toBe(8 * 5 + 7)
+
+  const fits = diagram(tree(chain(1)), 44, 0, 'line', 'pulse')
   expect(fits.isCut).toBe(false)
   expect(width(fits.rows) <= 44).toBe(true)
 
-  const cut = diagram(tree(...kids(8)), 44, 0, 'line', 'pulse')
+  const cut = diagram(tree(chain(2)), 44, 0, 'line', 'pulse')
   expect(cut.isCut).toBe(true)
   expect(width(cut.rows)).toBe(44)
   expect(cut.rows.some(r => r.map(x => x.text).join('').endsWith('…'))).toBe(true)
+})
+
+test('a model shows as its family and version; an alias shows as it is', () => {
+  expect(short('claude-sonnet-5-5')).toBe('sonnet 5.5')
+  expect(short('claude-opus-5-5[1m]')).toBe('opus 5.5')
+  expect(short('claude-haiku-4-5-20251001')).toBe('haiku 4.5')
+  expect(short('claude-sonnet-4-20250514')).toBe('sonnet 4')
+  expect(short('haiku')).toBe('haiku')
+  expect(short('gpt-x')).toBe('gpt-x')
+  expect(short(undefined)).toBe('')
 })
 
 // WCAG contrast: 4.5:1 is the floor for normal text.

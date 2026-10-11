@@ -2,7 +2,7 @@
 name: board-test
 description: Launch cheap Haiku subagents that exercise the /board pane (agent-board mod) - staggered finishes, bursts, tool fails, kills, resumes, nesting. User-invoked only.
 disable-model-invocation: true
-argument-hint: "[stagger|burst|fail|cancel|resume|haiku-default|tree|nest ...]"
+argument-hint: "[stagger|burst|fail|cancel|resume|haiku-default|tree|nest|lanes ...]"
 ---
 
 # Board test
@@ -27,12 +27,13 @@ Print the test table below (name, agents, what to watch) and ask which test to r
 | `haiku-default` | 1 Explore, NO model param | footer shows `* haiku: set by mod` |
 | `tree` | 1 parent + 2 children | 2 child rows nested under the parent. Main gets 1 message, from the parent |
 | `nest` | 2 parents started 5s apart, 3 children: P1 has 1, P2 has 2 started 4s apart | 1 row under P1, 2 rows under P2, rows appear at different times. Main gets 2 messages, none from a child |
+| `lanes` | 3: Lane 1 implement (in a worktree) and Lane 2 write together, Lane 1 review after Lane 1 implement reports | review sits under implement and above Lane 2, under one `Lane 1` heading (`Lane 1 · <branch>` if the board sees the worktree's branch); names show without `Lane N:`; card keys 1, 2, 3 in that order |
 
 ## Run
 
 1. Before launching, state the test, the agent count, and the cost: about 48k Haiku tokens per agent (mostly startup context).
-2. Launch all agents of one test in a single message so they start together. Exception: `nest`. Several tests: run them in the order given, one test at a time.
-3. Every Agent call: `subagent_type: "general-purpose"`, `model: "haiku"`, `description: "board-test <test> <detail>"` (the board shows the description). Exception: `haiku-default`.
+2. Launch all agents of one test in a single message so they start together. Exceptions: `nest`, `lanes`. Several tests: run them in the order given, one test at a time.
+3. Every Agent call: `subagent_type: "general-purpose"`, `model: "haiku"`, `description: "board-test <test> <detail>"` (the board shows the description). Exceptions: `haiku-default`, and `lanes` (its descriptions start with the lane).
 4. Wait command for every agent: `python3 -c 'import time; time.sleep(N)'`. Foreground `sleep` can be blocked. Keep N at 90 or less (Bash timeout is 120s).
 5. Every agent that main launches gets a prompt in this shape:
 
@@ -64,6 +65,11 @@ Print the test table below (name, agents, what to watch) and ask which test to r
   - P1: wait 2s, spawn P1.a (waits 9s), wait 12s, then wait for the reply and report.
   - P2: spawn P2.a (waits 13s), wait 4s, spawn P2.b (waits 5s), wait 10s, then wait for both replies and report with the order they arrived in.
   - Pass: main gets exactly 2 messages (P1, P2), and each one includes its children's replies.
+- **lanes**: launch A and B in one message. When A's report arrives, launch C.
+  - A: `description: "Lane 1: board-test implement"`, `isolation: "worktree"`, waits 10s. The session's directory must be in a git repo; the worktree is removed when the agent changes nothing.
+  - B: `description: "Lane 2: board-test write"`, waits 40s.
+  - C: `description: "Lane 1: board-test review"`, waits 10s.
+  - Pass: C shows between A and B with no heading of its own. Report whether the `Lane 1` heading showed a branch: that tells if the board sees a worktree agent's branch.
 
 ## Report
 

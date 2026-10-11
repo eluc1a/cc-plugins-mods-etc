@@ -18,12 +18,12 @@ const LONG_WORDS = 100
 const LAST_CALLS = 5
 // The dock width the board asks for; a width the person drags wins.
 const WIDTH = 46
-const MODEL_W = 9
+// The model and a star: `sonnet 5.5*`.
+const MODEL_W = 11
 const RIGHT_W = 7
-// The engine draws a row's hotkey before its name (`1: `); a row past 9 has none and keeps the space.
+// The engine draws a hotkey before its label (`1: `), outside the tree's text.
 const KEY_W = 3
-// The time lanes take a third of a row past its fixed columns; under 6 cells they show nothing.
-const LANE_SHARE = 1 / 3
+// A lane under 6 cells shows nothing.
 const LANE_MIN = 6
 // 8 frames a second: the engine redraws a pane at most 10 times a second.
 const FRAME_MS = 125
@@ -41,12 +41,16 @@ const ENDED: AgentStatus[] = ['completed', 'failed', 'killed']
 const ROUTED = ['Explore', 'general-purpose']
 // Past this the spawn goes on with the mod's own rule.
 const JEV_TIMEOUT_MS = 3000
+// A work lane, from the start of an Agent description: `Lane 2: review the diff`.
+const LANE = /^lane (\d+):\s*/i
 
 // $.state, so a save of this mod keeps the counts; a restart still forgets them.
 const agents = atom({ plugin: 'agent-board', key: 'agents' } as const, {} as Record<string, AgentStat>)
 const view = atom({ plugin: 'agent-board', key: 'view' } as const, { open: [], hideDone: false, still: false, cleared: [] } as BoardView)
 let timer: Timer | undefined
 let spin: Timer | undefined
+// The agents whose worktree the board looked for; a reload forgets them, and each costs one more look.
+const looked = new Set<string>()
 
 type Kind = 'working' | 'idle' | 'done' | 'failed' | 'other'
 // `wait`: how long the current tool call has run, while it runs.
@@ -57,6 +61,16 @@ const blank = (at: number): AgentStat => ({ tools: 0, fails: 0, last: [], at, is
 const kilo = (n: number) =>
   n < 1000 ? String(n) : n < 10_000 ? `${(n / 1000).toFixed(1)}k` : n < 999_500 ? `${Math.round(n / 1000)}k` : `${(n / 1e6).toFixed(1)}M`
 const minutes = (ms: number) => `${Math.ceil(ms / 60_000)}m`
+// `sonnet 5.5` for `claude-sonnet-5-5`, `sonnet 4` for `claude-sonnet-4-20250514`; an alias (`haiku`) shows
+// as it is. The full id shows in the details.
+export function short(model?: string) {
+  const m = model?.match(/(opus|sonnet|haiku|fable)(?:-(\d{1,2})(?!\d)(?:-(\d{1,2})(?!\d))?)?/)
+  if (m === null || m === undefined) {
+    return model?.replace(/^claude-/, '') ?? ''
+  }
+  const version = [m[2], m[3]].filter(x => x !== undefined).join('.')
+  return version === '' ? m[1]! : `${m[1]} ${version}`
+}
 const bar = (share: number) => {
   const n = Math.min(5, Math.max(0, Math.ceil(share * 5)))
   return '▰'.repeat(n) + '▱'.repeat(5 - n)
@@ -150,6 +164,24 @@ async function route($: EngineInterface, e: AgentSpawnInput): Promise<Pick | str
   return p.confidence < MIN_CONFIDENCE ? `${p.tier} at ${p.confidence.toFixed(2)}, low` : p
 }
 
+// The branch of an agent spawned to run in a directory other than the session's.
+async function branchOf($: EngineInterface, cwd: string | undefined) {
+  if (cwd === undefined || cwd === (await $.session.cwd())) {
+    return undefined
+  }
+  const r = await $.process.run(['git', 'branch', '--show-current'], { cwd, timeoutMs: 2000 }).catch(() => undefined)
+  return r?.exitCode === 0 && r.stdout.trim() !== '' ? r.stdout.trim() : undefined
+}
+
+// The branch of a worktree agent: the spawn gives no cwd for it, but its worktree is `agent-<id>`.
+// ponytail: that name is what the engine made in a live test, not a documented contract
+async function worktreeBranch($: EngineInterface, id: string) {
+  const r = await $.process.run(['git', 'worktree', 'list', '--porcelain'], { cwd: await $.session.cwd(), timeoutMs: 2000 }).catch(() => undefined)
+  // One block per worktree: `worktree <path>`, `HEAD <sha>`, `branch refs/heads/<name>`.
+  const block = r?.exitCode === 0 ? r.stdout.split('\n\n').find(b => b.split('\n')[0]?.endsWith(`/agent-${id}`)) : undefined
+  return block?.match(/^branch refs\/heads\/(.+)$/m)?.[1]
+}
+
 async function refresh($: EngineInterface) {
   const isRunning = (await $.agent.list()).some(a => a.status === 'running')
   const isOpen = (await $.ui.panes()).some(p => p.id === PANE)
@@ -232,7 +264,17 @@ export const register: Register = on => {
     if (ran.deny === undefined && ran.agentId !== undefined) {
       const { model, agentId } = ran
       const info = await entry($, agentId)
-      await touch($, agentId, (s, at) => ({ model, isStar: set !== undefined, route: why, isDone: false, since: at, start: s.start ?? at, info: info ?? s.info }))
+      const branch = await branchOf($, e.cwd)
+      await touch($, agentId, (s, at) => ({
+        model,
+        isStar: set !== undefined,
+        route: why,
+        isDone: false,
+        since: at,
+        start: s.start ?? at,
+        info: info ?? s.info,
+        branch: branch ?? s.branch,
+      }))
       watch($)
       animate($)
     }
@@ -253,6 +295,14 @@ export const register: Register = on => {
       start: s.start ?? at,
     }))
     animate($)
+    // By an agent's first tool call its worktree exists.
+    if (e.agentId !== undefined && !looked.has(e.agentId)) {
+      looked.add(e.agentId)
+      const branch = await worktreeBranch($, e.agentId).catch(() => undefined)
+      if (branch !== undefined) {
+        await touch($, e.agentId, () => ({ branch }))
+      }
+    }
     const ran = await next(e)
     const isFail = ran.deny !== undefined || ran.isError === true
     const isToMain = !isFail && e.agentId !== undefined && e.tool === 'SendMessage' && e.to === MAIN
@@ -321,8 +371,16 @@ export const register: Register = on => {
     const width = e.props.bodyColumns || WIDTH
     const stat = (id: string) => ({ ...blank(now), ...stats[id] })
     const ids = new Set(list.map(a => a.id))
+    const laneOf = (a: AgentInfo) => a.description.match(LANE)?.[1]
+    // Siblings with each lane together: a lane shows where its first agent started, its agents in start order.
+    const byLane = (sibs: AgentInfo[]) => {
+      const rank = (a: AgentInfo) => sibs.findIndex(b => b === a || (laneOf(a) !== undefined && laneOf(b) === laneOf(a)))
+      return [...sibs].sort((x, y) => rank(x) - rank(y))
+    }
     // An agent whose parent left the list hangs under main.
-    const kids = (parent?: string) => list.filter(a => (a.parentId !== undefined && ids.has(a.parentId) ? a.parentId : undefined) === parent)
+    const kids = (parent?: string) => byLane(list.filter(a => (a.parentId !== undefined && ids.has(a.parentId) ? a.parentId : undefined) === parent))
+    // An agent of main's drops its lane from its name: the lane's heading shows it.
+    const label = (a: AgentInfo, isTop: boolean) => a.name ?? (isTop ? a.description.replace(LANE, '') : a.description)
 
     const look = (status: string, s: AgentStat, coldMs: number): Look => {
       // A teammate that waits for a message is `idle`: live, not failed.
@@ -366,69 +424,52 @@ export const register: Register = on => {
     )
     const t0 = Math.min(...[...spans.values()].map(r => r[0]))
     const t1 = Math.max(...[...spans.values()].map(r => r[1]))
-    const share = Math.floor((width - 3 - MODEL_W - 1 - RIGHT_W) * LANE_SHARE)
-    const laneW = share >= LANE_MIN ? share : 0
+    // Each agent of main's draws in a card; the agents it started sit inside, under tree lines.
+    // The lanes all start in one column, past the model of the deepest agent shown.
+    const inner = width - 4
+    const top = kids(undefined).filter(a => !isHidden(a))
+    const depth = (id: string, d: number): number => Math.max(d, ...kids(id).filter(a => !isHidden(a)).map(a => depth(a.id, d + 1)))
+    const deepest = Math.max(0, ...top.map(a => depth(a.id, 0)))
+    const laneX = (deepest === 0 ? 0 : 2 + 2 * deepest) + 2 + MODEL_W + 1
+    const laneW = inner - laneX >= LANE_MIN ? inner - laneX : 0
     const clear = () =>
       void update($, view, w => ({ ...w, cleared: [...(w.cleared ?? []), ...list.filter(isDoneTree).map(a => a.id)] })).then(() => show($))
     const toggle = (id: string) => () =>
       void update($, view, w => ({ ...w, open: w.open.includes(id) ? w.open.filter(x => x !== id) : [...w.open, id] }))
 
     // Text keeps no key, so each keyed piece sits in a Box of its own.
-    // An agent's rows: the line itself, its current tool or idle note, and its details when expanded.
-    // `pad` draws the tree in front of the line, `cont` the tree in front of the lines under it.
-    // `digit`: the key that expands the row. `isNested`: the agent has a parent agent, so a message of its own to main skipped that parent.
-    const rows = (id: string, name: string, pad: string, cont: string, s: AgentStat, l: Look, digit?: string, isNested = false) => {
-      const isFlash = !v.still && s.flashAt !== undefined && now - s.flashAt < FLASH_MS
-      const model = `${s.model?.replace(/^claude-/, '') ?? ''}${s.isStar === true ? '*' : ''}`
-      const mark = s.isToMain === true ? '✉ ' : ''
-      const nameW = Math.max(4, width - pad.length - 3 - KEY_W - mark.length - MODEL_W - 1 - RIGHT_W - (laneW > 0 ? laneW + 1 : 0))
-      const label = fit(name, nameW)
-      const run = spans.get(id)
+    // The lines under an agent's name: its current tool or idle note, and its details when expanded.
+    // In a card each line fills the card between its edges; main's lines have no edges.
+    const under = (id: string, cont: string, s: AgentStat, l: Look, isCard: boolean) => {
+      const w = isCard ? inner : width
+      const cut = (t: string, n: number) => (isCard ? fit(t, n).padEnd(n) : fit(t, n))
       // Dim labels, bright values.
-      const detail = (key: string, head: string, value: string, color: string = C.text) => (
-        <Box key={key} flexDirection="row">
-          <Text color={C.muted}>{`${cont}    ${head.padEnd(8)}`}</Text>
-          <Text color={color} wrap="truncate-end">{value}</Text>
-        </Box>
-      )
+      const detail = (key: string, head: string, value: string, color: string = C.text) => {
+        const lead = `${cont}    ${head.padEnd(8)}`
+        return (
+          <Box key={key} flexDirection="row">
+            <Text color={C.muted}>{`${isCard ? '│ ' : ''}${lead}`}</Text>
+            <Text color={color}>{cut(value, w - lead.length)}</Text>
+            {isCard && <Text color={C.muted}> │</Text>}
+          </Box>
+        )
+      }
       const words = s.report
 
       return [
-        <Box key={`row-${id}`} flexDirection="row">
-          <Text color={C.muted}>{pad}</Text>
-          <Box key={`glyph-${id}`}>
-            <Text color={l.color} inverse={isFlash} bold={isFlash}>{l.glyph}</Text>
-          </Box>
-          <Text> </Text>
-          {digit === undefined && <Text>{' '.repeat(KEY_W)}</Text>}
-          <Button key={`open-${id}`} plain hotkey={digit} label={label} onPress={toggle(id)}>
-            {mark !== '' && <Text color={isNested ? C.soon : C.muted}>{mark}</Text>}
-            <Text color={l.color}>{label}</Text>
-          </Button>
-          <Text color={C.muted}>{`${' '.repeat(nameW - label.length + 1)}${fit(model, MODEL_W).padEnd(MODEL_W)} `}</Text>
-          {laneW > 0 && (
-            <Box key={`lane-${id}`}>
-              <Text color={l.color}>{run === undefined ? ' '.repeat(laneW) : lane(run[0], run[1], t0, t1, laneW)}</Text>
-            </Box>
-          )}
-          {laneW > 0 && <Text> </Text>}
-          <Box key={`right-${id}`}>
-            <Text color={l.color} inverse={isFlash}>
-              {fit(l.right, RIGHT_W).padStart(RIGHT_W)}
-            </Text>
-          </Box>
-        </Box>,
         l.note !== undefined && (
-          <Box key={`now-${id}`}>
-            <Text color={l.noteColor ?? C.muted} wrap="truncate-end">
+          <Box key={`now-${id}`} flexDirection="row">
+            {isCard && <Text color={C.muted}>│ </Text>}
+            <Text color={l.noteColor ?? C.muted}>
               {/* The clock goes last, so the tool's name gives way to it. */}
-              {`${cont}  └ ${l.wait === undefined ? l.note : `${fit(l.note, width - cont.length - 7 - l.wait.length)} · ${l.wait}`}`}
+              {cut(`${cont}  └ ${l.wait === undefined ? l.note : `${fit(l.note, w - cont.length - 7 - l.wait.length)} · ${l.wait}`}`, w)}
             </Text>
+            {isCard && <Text color={C.muted}> │</Text>}
           </Box>
         ),
         v.open.includes(id) && (
           <Box key={`detail-${id}`} flexDirection="column">
-            {s.route !== undefined && detail(`route-${id}`, 'model', s.route)}
+            {s.model !== undefined && detail(`model-${id}`, 'model', s.route === undefined ? s.model : `${s.model} · ${s.route}`)}
             {detail(`tokens-${id}`, 'tokens', s.tokens + s.cached > 0 ? `${kilo(s.tokens)} + ${kilo(s.cached)} cached` : '—')}
             {detail(`tools-${id}`, 'tools', `${s.tools}${s.fails > 0 ? `  ✗${s.fails}` : ''}`, s.fails > 0 ? C.failed : undefined)}
             {l.cache !== undefined && detail(`cache-${id}`, 'cache', l.cache, l.noteColor === C.soon ? C.soon : undefined)}
@@ -440,33 +481,169 @@ export const register: Register = on => {
       ]
     }
 
+    // An agent's lines in a card: glyph, name and time, then model and lane, then the lines under them.
+    // `pad` draws the tree in front of the name, `cont` the tree in front of the lines under it.
+    // A nested agent's ✉ shows on its name, yellow: it skipped its parent. A card's own ✉ is in its title.
+    const rows = (a: AgentInfo, pad: string, cont: string) => {
+      const id = a.id
+      const s = stat(id)
+      const l = looks.get(id) ?? look(a.status, s, COLD_MS)
+      const isFlash = !v.still && s.flashAt !== undefined && now - s.flashAt < FLASH_MS
+      const mark = pad !== '' && s.isToMain === true ? '✉ ' : ''
+      const nameW = Math.max(4, inner - pad.length - 2 - mark.length - 1 - RIGHT_W)
+      const name = fit(label(a, pad === ''), nameW)
+      const lead = fit(`${cont}  ${fit(`${short(s.model)}${s.isStar === true ? '*' : ''}`, MODEL_W)}`, inner)
+      const run = spans.get(id)
+
+      return [
+        <Box key={`row-${id}`} flexDirection="row">
+          <Text color={C.muted}>{`│ ${pad}`}</Text>
+          <Box key={`glyph-${id}`}>
+            <Text color={l.color} inverse={isFlash} bold={isFlash}>{l.glyph}</Text>
+          </Box>
+          <Text> </Text>
+          <Button key={`open-${id}`} plain label={name} onPress={toggle(id)}>
+            {mark !== '' && <Text color={C.soon}>{mark}</Text>}
+            <Text color={l.color}>{name}</Text>
+          </Button>
+          <Text>{' '.repeat(nameW - name.length + 1)}</Text>
+          <Box key={`right-${id}`}>
+            <Text color={l.color} inverse={isFlash}>
+              {fit(l.right, RIGHT_W).padStart(RIGHT_W)}
+            </Text>
+          </Box>
+          <Text color={C.muted}> │</Text>
+        </Box>,
+        <Box key={`meta-${id}`} flexDirection="row">
+          <Text color={C.muted}>{`│ ${lead.padEnd(laneW > 0 ? laneX : inner)}`}</Text>
+          {laneW > 0 && (
+            <Box key={`lane-${id}`}>
+              <Text color={l.color}>{run === undefined ? ' '.repeat(laneW) : lane(run[0], run[1], t0, t1, laneW)}</Text>
+            </Box>
+          )}
+          <Text color={C.muted}> │</Text>
+        </Box>,
+        ...under(id, cont, s, l, true),
+      ]
+    }
+
+    // A card's title gives its key, its state and what it holds: `╭─ 2: working · 2 agents inside ──╮`.
+    const card = (a: AgentInfo, digit?: string) => {
+      const s = stat(a.id)
+      const l = looks.get(a.id) ?? look(a.status, s, COLD_MS)
+      const lines = rows(a, '', '')
+      const own = lines.length
+      let inside = 0
+      const walk = (parent: string, pad: string) => {
+        const shown = kids(parent).filter(k => !isHidden(k))
+        shown.forEach((k, i) => {
+          const isLast = i === shown.length - 1
+          const cont = `${pad}${isLast ? '  ' : '│ '}`
+          inside += 1
+          lines.push(...rows(k, `${pad}${isLast ? '└ ' : '├ '}`, cont))
+          walk(k.id, cont)
+        })
+      }
+      walk(a.id, '  ')
+      if (inside > 0) {
+        lines.splice(own, 0, <Box key={`gap-${a.id}`}><Text color={C.muted}>{`│ ${' '.repeat(inner)} │`}</Text></Box>)
+      }
+      const state = l.kind === 'other' ? a.status : l.kind
+      const what = [inside > 0 ? `${inside} agent${inside === 1 ? '' : 's'} inside` : '', s.isToMain === true ? '✉ sent to main' : '']
+        .filter(x => x !== '')
+        .map(x => ` · ${x}`)
+        .join('')
+      const keyW = digit === undefined ? 0 : KEY_W
+      const extra = fit(what, Math.max(0, width - keyW - 6 - state.length))
+
+      return (
+        <Box key={`card-${a.id}`} flexDirection="column">
+          <Box key={`title-${a.id}`} flexDirection="row">
+            <Text color={C.muted}>╭─ </Text>
+            {digit === undefined ? (
+              <Text color={l.color}>{state}</Text>
+            ) : (
+              <Button key={`key-${a.id}`} plain hotkey={digit} label={state} onPress={toggle(a.id)}>
+                <Text color={l.color}>{state}</Text>
+              </Button>
+            )}
+            <Text color={C.muted}>{`${extra} ${'─'.repeat(Math.max(1, width - keyW - 5 - state.length - extra.length))}╮`}</Text>
+          </Box>
+          {lines}
+          <Box key={`end-${a.id}`}>
+            <Text color={C.muted}>{`╰${'─'.repeat(width - 2)}╯`}</Text>
+          </Box>
+        </Box>
+      )
+    }
+
+    // The heading over the first of a lane's agents of main's: `Lane 1 · feat-x`, the branch of the first that has one.
+    const heading = (a: AgentInfo, i: number) => {
+      const n = laneOf(a)
+      if (n === undefined || (i > 0 && laneOf(top[i - 1]!) === n)) {
+        return undefined
+      }
+      const branch = top.map(b => (laneOf(b) === n ? stats[b.id]?.branch : undefined)).find(b => b !== undefined)
+      return branch === undefined ? `Lane ${n}` : `Lane ${n} · ${branch}`
+    }
+
+    // Main heads the board on one line, outside the cards: key 0, model and time.
     const main = { ...blank(now), isDone: true, ...stats[MAIN], model: await $.session.model() }
     const mainLook = look('running', main, MAIN_COLD_MS)
-    const out = rows(MAIN, MAIN, '', '', main, mainLook, '0')
-    // Rows take the keys 1 to 9 in the order they show.
-    let n = 0
-    const walk = (parent: string | undefined, pad: string) => {
-      const shown = kids(parent).filter(a => !isHidden(a))
-      shown.forEach((a, i) => {
-        const isLast = i === shown.length - 1
-        const cont = `${pad}${isLast ? '  ' : '│ '}`
-        const l = looks.get(a.id) ?? look(a.status, stat(a.id), COLD_MS)
-        n += 1
-        const digit = n <= 9 ? String(n) : undefined
-        out.push(...rows(a.id, a.name ?? a.description, `${pad}${isLast ? '└ ' : '├ '}`, cont, stat(a.id), l, digit, a.parentId !== undefined))
-        walk(a.id, cont)
-      })
-    }
-    walk(undefined, '')
+    const mainFlash = !v.still && main.flashAt !== undefined && now - main.flashAt < FLASH_MS
+    const mainModel = short(main.model)
+    // Cards take the keys 1 to 9 in the order they show.
+    const out = [
+      <Box key={`row-${MAIN}`} flexDirection="row">
+        <Box key={`glyph-${MAIN}`}>
+          <Text color={mainLook.color} inverse={mainFlash} bold={mainFlash}>{mainLook.glyph}</Text>
+        </Box>
+        <Text> </Text>
+        <Button key={`open-${MAIN}`} plain hotkey="0" label={MAIN} onPress={toggle(MAIN)}>
+          <Text color={mainLook.color}>{MAIN}</Text>
+        </Button>
+        <Text color={C.muted}>{`   ${mainModel}${' '.repeat(Math.max(1, width - KEY_W - 9 - mainModel.length - RIGHT_W))}`}</Text>
+        <Box key={`right-${MAIN}`}>
+          <Text color={mainLook.color} inverse={mainFlash}>
+            {fit(mainLook.right, RIGHT_W).padStart(RIGHT_W)}
+          </Text>
+        </Box>
+      </Box>,
+      ...under(MAIN, '', main, mainLook, false),
+      top.length > 0 && (
+        <Box key="gap">
+          <Text> </Text>
+        </Box>
+      ),
+      ...top.flatMap((a, i) => {
+        const head = heading(a, i)
+        return [
+          head !== undefined && (
+            <Box key={`heading-${a.id}`}>
+              <Text color={C.muted}>{fit(head, width)}</Text>
+            </Box>
+          ),
+          card(a, i < 9 ? String(i + 1) : undefined),
+        ]
+      }),
+    ]
 
     // The diagram view: the same tree as boxes, its lines pulsing toward the working agents.
-    const node = (a: AgentInfo): Node => {
+    const meta = (model: string | undefined, right: string) => [short(model), right].filter(x => x !== '').join(' · ')
+    const node = (a: AgentInfo, isTop: boolean): Node => {
       const l = looks.get(a.id) ?? look(a.status, stat(a.id), COLD_MS)
-      const under = kids(a.id).filter(k => !isHidden(k))
-      return { label: a.name ?? a.description, glyph: l.glyph, color: l.color, isLive: l.kind === 'working', kids: under.map(node) }
+      const below = kids(a.id).filter(k => !isHidden(k))
+      const own = { label: label(a, isTop), glyph: l.glyph, color: l.color, meta: meta(stat(a.id).model, l.right), isLive: l.kind === 'working' }
+      return { ...own, kids: below.map(k => node(k, false)) }
     }
-    const top = kids(undefined).filter(a => !isHidden(a))
-    const root: Node = { label: MAIN, glyph: mainLook.glyph, color: mainLook.color, isLive: false, kids: top.map(node) }
+    const root: Node = {
+      label: MAIN,
+      glyph: mainLook.glyph,
+      color: mainLook.color,
+      meta: meta(main.model, mainLook.right),
+      isLive: false,
+      kids: top.map((a, i) => ({ ...node(a, true), title: heading(a, i) })),
+    }
     const dg = v.diagram === true ? diagram(root, width, v.still ? undefined : Math.floor(now / FRAME_MS), C.muted, C.working) : undefined
 
     const counts = (['working', 'idle', 'failed', 'done'] as const)
@@ -474,7 +651,7 @@ export const register: Register = on => {
       .filter(c => c.n > 0)
     const color = { working: C.working, idle: C.muted, failed: C.failed, done: C.done }
     const isStarred = list.some(a => stats[a.id]?.isStar === true)
-    const isSkipped = list.some(a => a.parentId !== undefined && stats[a.id]?.isToMain === true && !isHidden(a))
+    const isSkipped = list.some(a => a.parentId !== undefined && ids.has(a.parentId) && stats[a.id]?.isToMain === true && !isHidden(a))
 
     // Docked, the color fills the whole body; inline, the frame fits the tree.
     return (
@@ -526,7 +703,7 @@ export const register: Register = on => {
             </Button>
             <Text>  </Text>
             <Button key="view" plain hotkey="v" onPress={() => void update($, view, w => ({ ...w, diagram: w.diagram !== true }))}>
-              <Text color={C.text}>{v.diagram === true ? 'lanes' : 'diagram'}</Text>
+              <Text color={C.text}>{v.diagram === true ? 'list' : 'diagram'}</Text>
             </Button>
           </Box>
           <Box key="keys2" flexDirection="row">

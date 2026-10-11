@@ -31,6 +31,8 @@ export type AgentStat = {
   flashAt?: number
   // The agent sent a message to main: its row shows ✉, yellow when the agent is nested and so skipped its parent.
   isToMain?: boolean
+  // The git branch of an agent that runs in a worktree or a directory other than the session's: its lane's heading shows it.
+  branch?: string
   // The agent's list entry, kept so its row outlives the engine's task.
   info?: { description: string; type: string; name?: string; parentId?: string }
 }
