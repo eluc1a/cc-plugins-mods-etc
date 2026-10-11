@@ -1,7 +1,7 @@
 import type { EngineInterface, Register } from 'claude-code'
 
 const SOFT_LIMIT = 180_000
-const MAX_CYCLES = 5
+const MAX_CYCLES = 10
 
 const stopNote = (why: string) =>
   `[relay] ${why} ` +
