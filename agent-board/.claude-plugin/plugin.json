@@ -1,6 +1,6 @@
 {
   "name": "agent-board",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "/board pane: tree of this session's agents with current tool, fails and tokens. A spawn that names no model gets one from Jev (OPENROUTER_API_KEY), else haiku for Explore.",
   "author": {
     "name": "elucia"

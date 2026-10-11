@@ -14,6 +14,9 @@ const MAIN = 'main'
 const COLD_MS = 5 * 60_000
 const MAIN_COLD_MS = 60 * 60_000
 const SOON_MS = 60_000
+// A working agent with no tool call or return for this long turns its tool line yellow: it may be stuck.
+// ponytail: one fixed limit, a long test run trips it too
+const QUIET_MS = 3 * 60_000
 const LONG_WORDS = 100
 const LAST_CALLS = 5
 // The dock width the board asks for; a width the person drags wins.
@@ -34,6 +37,8 @@ const FRAMES = '⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
 // Each bg channel stays under 26, so a 256-color terminal rounds bg to black, not navy.
 export const PALETTE = { bg: '#141019', text: '#e6e1f2', muted: '#9d97b8', working: '#ffb055', done: '#8bd6a8', failed: '#ff8f9b', soon: '#f2d27a' } as const
 const C = PALETTE
+// Each work lane's heading and card edges: purple, aqua, pink, blue, white, then again from purple. None is a status color.
+export const LANE_COLORS = ['#c08cff', '#5ce1e6', '#ff79e0', '#6aa6ff', '#f2f2f2'] as const
 // The input fields that name what a tool call works on: the first one present wins.
 const BRIEF_KEYS = ['description', 'file_path', 'command', 'pattern', 'url', 'query', 'skill', 'to']
 const ENDED: AgentStatus[] = ['completed', 'failed', 'killed']
@@ -53,8 +58,9 @@ let spin: Timer | undefined
 const looked = new Set<string>()
 
 type Kind = 'working' | 'idle' | 'done' | 'failed' | 'other'
-// `wait`: how long the current tool call has run, while it runs.
-type Look = { kind: Kind; glyph: string; color: string; right: string; note?: string; noteColor?: string; cache?: string; wait?: string }
+// `wait`: how long the current tool call has run, or how long ago the last one returned.
+// `isQuiet`: working, with no tool call or return for QUIET_MS.
+type Look = { kind: Kind; glyph: string; color: string; right: string; note?: string; noteColor?: string; cache?: string; wait?: string; isQuiet?: boolean }
 
 const title = (count: number) => `Agents · ${count}`
 const blank = (at: number): AgentStat => ({ tools: 0, fails: 0, last: [], at, isDone: false, tokens: 0, cached: 0, ms: 0 })
@@ -81,7 +87,7 @@ function lane(from: number, to: number, t0: number, t1: number, w: number) {
   const cell = Math.max(1, t1 - t0) / w
   const a = Math.max(0, Math.min(w - 1, Math.floor((from - t0) / cell)))
   const b = Math.max(a, Math.min(w - 1, Math.ceil((to - t0) / cell) - 1))
-  return ' '.repeat(a) + '━'.repeat(b - a + 1) + ' '.repeat(w - 1 - b)
+  return ' '.repeat(a) + '▆'.repeat(b - a + 1) + ' '.repeat(w - 1 - b)
 }
 
 function clock(ms: number) {
@@ -372,6 +378,11 @@ export const register: Register = on => {
     const stat = (id: string) => ({ ...blank(now), ...stats[id] })
     const ids = new Set(list.map(a => a.id))
     const laneOf = (a: AgentInfo) => a.description.match(LANE)?.[1]
+    // Lane 1 takes the first color, lane 6 the first again.
+    const edgeOf = (a: AgentInfo) => {
+      const n = laneOf(a)
+      return n === undefined ? C.muted : LANE_COLORS[(Number(n) + LANE_COLORS.length - 1) % LANE_COLORS.length]!
+    }
     // Siblings with each lane together: a lane shows where its first agent started, its agents in start order.
     const byLane = (sibs: AgentInfo[]) => {
       const rank = (a: AgentInfo) => sibs.findIndex(b => b === a || (laneOf(a) !== undefined && laneOf(b) === laneOf(a)))
@@ -398,9 +409,15 @@ export const register: Register = on => {
       }
       if (status === 'running' && !isIdle) {
         const glyph = v.still ? '●' : (FRAMES[Math.floor(now / FRAME_MS) % FRAMES.length] ?? '●')
-        const call = s.last.at(-1)
-        const wait = s.tool !== undefined && call?.at !== undefined && call.end === undefined ? clock(now - call.at) : undefined
-        return { kind: 'working', glyph, color: C.working, right: time, note: s.tool, cache: 'warm', wait }
+        // s.tool is set by this turn's calls only: main's list keeps the calls of its earlier turns.
+        const call = s.tool === undefined ? undefined : s.last.at(-1)
+        const isCalling = call?.at !== undefined && call.end === undefined
+        // Since the running call started, the last call returned, or else the turn started.
+        const quiet = now - (isCalling ? call.at! : (call?.end ?? s.since ?? now))
+        const wait = call === undefined ? undefined : isCalling ? clock(quiet) : `${clock(quiet)} ago`
+        const isQuiet = quiet >= QUIET_MS
+        const note = s.tool ?? (isQuiet ? `no tool call · ${clock(quiet)}` : undefined)
+        return { kind: 'working', glyph, color: C.working, right: time, note, noteColor: isQuiet ? C.soon : undefined, cache: 'warm', wait, isQuiet }
       }
       if (isIdle) {
         const color = left < SOON_MS ? C.soon : C.muted
@@ -439,18 +456,20 @@ export const register: Register = on => {
 
     // Text keeps no key, so each keyed piece sits in a Box of its own.
     // The lines under an agent's name: its current tool or idle note, and its details when expanded.
-    // In a card each line fills the card between its edges; main's lines have no edges.
-    const under = (id: string, cont: string, s: AgentStat, l: Look, isCard: boolean) => {
+    // In a card each line fills the card between its edges, in `edge`; main's lines have no edges.
+    const under = (id: string, cont: string, s: AgentStat, l: Look, edge?: string) => {
+      const isCard = edge !== undefined
       const w = isCard ? inner : width
       const cut = (t: string, n: number) => (isCard ? fit(t, n).padEnd(n) : fit(t, n))
-      // Dim labels, bright values.
-      const detail = (key: string, head: string, value: string, color: string = C.text) => {
+      // Dim labels, bright values. `tail` goes last, so the value gives way to it; in a card it sits at the right edge.
+      const detail = (key: string, head: string, value: string, color: string = C.text, tail = '') => {
         const lead = `${cont}    ${head.padEnd(8)}`
         return (
           <Box key={key} flexDirection="row">
-            <Text color={C.muted}>{`${isCard ? '│ ' : ''}${lead}`}</Text>
-            <Text color={color}>{cut(value, w - lead.length)}</Text>
-            {isCard && <Text color={C.muted}> │</Text>}
+            {isCard && <Text color={edge}>│ </Text>}
+            <Text color={C.muted}>{lead}</Text>
+            <Text color={color}>{`${cut(value, w - lead.length - tail.length)}${tail}`}</Text>
+            {isCard && <Text color={edge}> │</Text>}
           </Box>
         )
       }
@@ -459,12 +478,12 @@ export const register: Register = on => {
       return [
         l.note !== undefined && (
           <Box key={`now-${id}`} flexDirection="row">
-            {isCard && <Text color={C.muted}>│ </Text>}
+            {isCard && <Text color={edge}>│ </Text>}
             <Text color={l.noteColor ?? C.muted}>
               {/* The clock goes last, so the tool's name gives way to it. */}
               {cut(`${cont}  └ ${l.wait === undefined ? l.note : `${fit(l.note, w - cont.length - 7 - l.wait.length)} · ${l.wait}`}`, w)}
             </Text>
-            {isCard && <Text color={C.muted}> │</Text>}
+            {isCard && <Text color={edge}> │</Text>}
           </Box>
         ),
         v.open.includes(id) && (
@@ -472,10 +491,14 @@ export const register: Register = on => {
             {s.model !== undefined && detail(`model-${id}`, 'model', s.route === undefined ? s.model : `${s.model} · ${s.route}`)}
             {detail(`tokens-${id}`, 'tokens', s.tokens + s.cached > 0 ? `${kilo(s.tokens)} + ${kilo(s.cached)} cached` : '—')}
             {detail(`tools-${id}`, 'tools', `${s.tools}${s.fails > 0 ? `  ✗${s.fails}` : ''}`, s.fails > 0 ? C.failed : undefined)}
-            {l.cache !== undefined && detail(`cache-${id}`, 'cache', l.cache, l.noteColor === C.soon ? C.soon : undefined)}
+            {l.cache !== undefined && detail(`cache-${id}`, 'cache', l.cache, l.kind === 'idle' && l.noteColor === C.soon ? C.soon : undefined)}
+            {s.start !== undefined && detail(`started-${id}`, 'started', `${clock(now - s.start)} ago`)}
             {words !== undefined &&
               detail(`report-${id}`, 'report', words === 0 ? 'none' : `${words} words${words > LONG_WORDS ? ' · long' : ''}`)}
-            {s.last.map((c, i) => detail(`last-${id}-${i}`, i === 0 ? 'last' : '', `${c.label}${c.isError === true ? '  ✗' : ''}`, c.isError === true ? C.failed : undefined))}
+            {s.last.map((c, i) => {
+              const ago = c.at === undefined ? '' : `  ${clock(now - c.at)} ago`
+              return detail(`last-${id}-${i}`, i === 0 ? 'last' : '', `${c.label}${c.isError === true ? '  ✗' : ''}`, c.isError === true ? C.failed : undefined, ago)
+            })}
           </Box>
         ),
       ]
@@ -484,7 +507,7 @@ export const register: Register = on => {
     // An agent's lines in a card: glyph, name and time, then model and lane, then the lines under them.
     // `pad` draws the tree in front of the name, `cont` the tree in front of the lines under it.
     // A nested agent's ✉ shows on its name, yellow: it skipped its parent. A card's own ✉ is in its title.
-    const rows = (a: AgentInfo, pad: string, cont: string) => {
+    const rows = (a: AgentInfo, pad: string, cont: string, edge: string) => {
       const id = a.id
       const s = stat(id)
       const l = looks.get(id) ?? look(a.status, s, COLD_MS)
@@ -497,7 +520,8 @@ export const register: Register = on => {
 
       return [
         <Box key={`row-${id}`} flexDirection="row">
-          <Text color={C.muted}>{`│ ${pad}`}</Text>
+          <Text color={edge}>│ </Text>
+          <Text color={C.muted}>{pad}</Text>
           <Box key={`glyph-${id}`}>
             <Text color={l.color} inverse={isFlash} bold={isFlash}>{l.glyph}</Text>
           </Box>
@@ -512,18 +536,19 @@ export const register: Register = on => {
               {fit(l.right, RIGHT_W).padStart(RIGHT_W)}
             </Text>
           </Box>
-          <Text color={C.muted}> │</Text>
+          <Text color={edge}> │</Text>
         </Box>,
         <Box key={`meta-${id}`} flexDirection="row">
-          <Text color={C.muted}>{`│ ${lead.padEnd(laneW > 0 ? laneX : inner)}`}</Text>
+          <Text color={edge}>│ </Text>
+          <Text color={C.muted}>{lead.padEnd(laneW > 0 ? laneX : inner)}</Text>
           {laneW > 0 && (
             <Box key={`lane-${id}`}>
               <Text color={l.color}>{run === undefined ? ' '.repeat(laneW) : lane(run[0], run[1], t0, t1, laneW)}</Text>
             </Box>
           )}
-          <Text color={C.muted}> │</Text>
+          <Text color={edge}> │</Text>
         </Box>,
-        ...under(id, cont, s, l, true),
+        ...under(id, cont, s, l, edge),
       ]
     }
 
@@ -531,7 +556,8 @@ export const register: Register = on => {
     const card = (a: AgentInfo, digit?: string) => {
       const s = stat(a.id)
       const l = looks.get(a.id) ?? look(a.status, s, COLD_MS)
-      const lines = rows(a, '', '')
+      const edge = edgeOf(a)
+      const lines = rows(a, '', '', edge)
       const own = lines.length
       let inside = 0
       const walk = (parent: string, pad: string) => {
@@ -540,13 +566,13 @@ export const register: Register = on => {
           const isLast = i === shown.length - 1
           const cont = `${pad}${isLast ? '  ' : '│ '}`
           inside += 1
-          lines.push(...rows(k, `${pad}${isLast ? '└ ' : '├ '}`, cont))
+          lines.push(...rows(k, `${pad}${isLast ? '└ ' : '├ '}`, cont, edge))
           walk(k.id, cont)
         })
       }
       walk(a.id, '  ')
       if (inside > 0) {
-        lines.splice(own, 0, <Box key={`gap-${a.id}`}><Text color={C.muted}>{`│ ${' '.repeat(inner)} │`}</Text></Box>)
+        lines.splice(own, 0, <Box key={`gap-${a.id}`}><Text color={edge}>{`│ ${' '.repeat(inner)} │`}</Text></Box>)
       }
       const state = l.kind === 'other' ? a.status : l.kind
       const what = [inside > 0 ? `${inside} agent${inside === 1 ? '' : 's'} inside` : '', s.isToMain === true ? '✉ sent to main' : '']
@@ -559,7 +585,7 @@ export const register: Register = on => {
       return (
         <Box key={`card-${a.id}`} flexDirection="column">
           <Box key={`title-${a.id}`} flexDirection="row">
-            <Text color={C.muted}>╭─ </Text>
+            <Text color={edge}>╭─ </Text>
             {digit === undefined ? (
               <Text color={l.color}>{state}</Text>
             ) : (
@@ -567,11 +593,12 @@ export const register: Register = on => {
                 <Text color={l.color}>{state}</Text>
               </Button>
             )}
-            <Text color={C.muted}>{`${extra} ${'─'.repeat(Math.max(1, width - keyW - 5 - state.length - extra.length))}╮`}</Text>
+            <Text color={C.muted}>{extra}</Text>
+            <Text color={edge}>{` ${'─'.repeat(Math.max(1, width - keyW - 5 - state.length - extra.length))}╮`}</Text>
           </Box>
           {lines}
           <Box key={`end-${a.id}`}>
-            <Text color={C.muted}>{`╰${'─'.repeat(width - 2)}╯`}</Text>
+            <Text color={edge}>{`╰${'─'.repeat(width - 2)}╯`}</Text>
           </Box>
         </Box>
       )
@@ -609,7 +636,7 @@ export const register: Register = on => {
           </Text>
         </Box>
       </Box>,
-      ...under(MAIN, '', main, mainLook, false),
+      ...under(MAIN, '', main, mainLook),
       top.length > 0 && (
         <Box key="gap">
           <Text> </Text>
@@ -620,7 +647,7 @@ export const register: Register = on => {
         return [
           head !== undefined && (
             <Box key={`heading-${a.id}`}>
-              <Text color={C.muted}>{fit(head, width)}</Text>
+              <Text color={edgeOf(a)}>{fit(head, width)}</Text>
             </Box>
           ),
           card(a, i < 9 ? String(i + 1) : undefined),
@@ -630,11 +657,12 @@ export const register: Register = on => {
 
     // The diagram view: the same tree as boxes, its lines pulsing toward the working agents.
     const meta = (model: string | undefined, right: string) => [short(model), right].filter(x => x !== '').join(' · ')
-    const node = (a: AgentInfo, isTop: boolean): Node => {
+    // A lane's boxes, and the boxes of the agents they started, take the lane's color.
+    const node = (a: AgentInfo, isTop: boolean, edge: string): Node => {
       const l = looks.get(a.id) ?? look(a.status, stat(a.id), COLD_MS)
       const below = kids(a.id).filter(k => !isHidden(k))
-      const own = { label: label(a, isTop), glyph: l.glyph, color: l.color, meta: meta(stat(a.id).model, l.right), isLive: l.kind === 'working' }
-      return { ...own, kids: below.map(k => node(k, false)) }
+      const own = { label: label(a, isTop), glyph: l.glyph, color: l.color, meta: meta(stat(a.id).model, l.right), isLive: l.kind === 'working', edge }
+      return { ...own, kids: below.map(k => node(k, false, edge)) }
     }
     const root: Node = {
       label: MAIN,
@@ -642,7 +670,7 @@ export const register: Register = on => {
       color: mainLook.color,
       meta: meta(main.model, mainLook.right),
       isLive: false,
-      kids: top.map((a, i) => ({ ...node(a, true), title: heading(a, i) })),
+      kids: top.map((a, i) => ({ ...node(a, true, edgeOf(a)), title: heading(a, i) })),
     }
     const dg = v.diagram === true ? diagram(root, width, v.still ? undefined : Math.floor(now / FRAME_MS), C.muted, C.working) : undefined
 
@@ -651,6 +679,7 @@ export const register: Register = on => {
       .filter(c => c.n > 0)
     const color = { working: C.working, idle: C.muted, failed: C.failed, done: C.done }
     const isStarred = list.some(a => stats[a.id]?.isStar === true)
+    const isQuiet = [mainLook, ...looks.values()].some(l => l.isQuiet === true)
     const isSkipped = list.some(a => a.parentId !== undefined && ids.has(a.parentId) && stats[a.id]?.isToMain === true && !isHidden(a))
 
     // Docked, the color fills the whole body; inline, the frame fits the tree.
@@ -690,6 +719,11 @@ export const register: Register = on => {
         {dg === undefined && isSkipped && (
           <Box key="skipnote">
             <Text color={C.soon}>✉ yellow: sent to main, not to its parent</Text>
+          </Box>
+        )}
+        {dg === undefined && isQuiet && (
+          <Box key="quietnote">
+            <Text color={C.soon}>{`└ yellow: no tool call or return for ${clock(QUIET_MS)}`}</Text>
           </Box>
         )}
         <Box key="footer" flexDirection="column">

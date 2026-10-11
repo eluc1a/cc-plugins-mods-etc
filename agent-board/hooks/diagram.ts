@@ -3,7 +3,8 @@
 // parent, one cell a frame, so the motion runs toward the subagents; motion off, the live path holds lit.
 
 // `meta`: the line under the name, model and time. `title`: a heading over the box, as a lane's first agent has.
-export type Node = { label: string; glyph: string; color: string; meta: string; isLive: boolean; kids: Node[]; title?: string }
+// `edge`: the color of the box's border and its heading, a lane's color; else the lines' color.
+export type Node = { label: string; glyph: string; color: string; meta: string; isLive: boolean; kids: Node[]; title?: string; edge?: string }
 export type Run = { text: string; color: string }
 
 const BOX_MAX = 24
@@ -66,14 +67,15 @@ export function diagram(root: Node, width: number, frame: number | undefined, li
       body.push([`   ${second}`, n.color])
     }
     body.push([`   ${fit(n.meta, bw - 6)}`, line])
-    write(x, y, `╭${'─'.repeat(bw - 2)}╮`, line)
+    const edge = n.edge ?? line
+    write(x, y, `╭${'─'.repeat(bw - 2)}╮`, edge)
     for (let i = 0; i < BOX_H - 2; i += 1) {
       const [text, color] = body[i] ?? ['', line]
-      write(x, y + 1 + i, '│', line)
+      write(x, y + 1 + i, '│', edge)
       write(x + 1, y + 1 + i, text.padEnd(bw - 2), color)
-      write(x + bw - 1, y + 1 + i, '│', line)
+      write(x + bw - 1, y + 1 + i, '│', edge)
     }
-    write(x, y + BOX_H - 1, `╰${'─'.repeat(bw - 2)}╯`, line)
+    write(x, y + BOX_H - 1, `╰${'─'.repeat(bw - 2)}╯`, edge)
     if (n.kids.length === 0) {
       return
     }
@@ -83,7 +85,7 @@ export function diagram(root: Node, width: number, frame: number | undefined, li
     let ky = y0
     const ends = n.kids.map(k => {
       if (k.title !== undefined) {
-        write(r + LINK + 1, ky, fit(k.title, gridW - r - LINK - 1), line)
+        write(r + LINK + 1, ky, fit(k.title, gridW - r - LINK - 1), k.edge ?? line)
         ky += 1
       }
       const at = ky + lift(k) + MID

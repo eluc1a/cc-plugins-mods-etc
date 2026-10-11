@@ -4,7 +4,7 @@ import type { AgentInfo, AgentSpawnArgs, AgentStatus, On, PaneOpenArgs } from 'c
 
 import { diagram } from '../hooks/diagram'
 import type { Node } from '../hooks/diagram'
-import { PALETTE, short } from '../hooks/register'
+import { LANE_COLORS, PALETTE, short } from '../hooks/register'
 import { JEV_MODEL, JEV_URL, pick, question } from '../hooks/route'
 
 const words = (n: number) => Array.from({ length: n }, () => 'word').join(' ')
@@ -242,10 +242,10 @@ test('each agent of main gets a card that fills the dock: glyph, name and time, 
     expect(await text(ui, 'row-main')).toMatch(/^○ main   opus 5\.5\s+$/)
     expect(await text(ui, 'title-a1')).toMatch(/^╭─ done ─+╮$/)
     expect(await text(ui, 'row-a1')).toMatch(/^│ ✓ explore logs\s+0:00 │$/)
-    expect(await text(ui, 'meta-a1')).toMatch(/^│   haiku\*\s+━\s+│$/)
+    expect(await text(ui, 'meta-a1')).toMatch(/^│   haiku\*\s+▆\s+│$/)
     expect(await text(ui, 'row-a2')).toMatch(/^│ ⠋ task two\s+6:00 │$/)
-    expect(await text(ui, 'meta-a2')).toMatch(/^│   opus\s+━{26} │$/)
-    expect(await text(ui, 'now-a2')).toMatch(/^│   └ Bash: ls\s+│$/)
+    expect(await text(ui, 'meta-a2')).toMatch(/^│   opus\s+▆{26} │$/)
+    expect(await text(ui, 'now-a2')).toMatch(/^│   └ Bash: ls · 6:00 ago\s+│$/)
     expect(await text(ui, 'row-a3')).toMatch(/^│ ○ task three\s+/)
     expect(await text(ui, 'meta-a3')).toMatch(/^│   sonnet\s/)
     expect(await text(ui, 'end-a3')).toBe(`╰${'─'.repeat(WIDTH - 2)}╯`)
@@ -271,12 +271,13 @@ test('each agent of main gets a card that fills the dock: glyph, name and time, 
 })
 
 test('pressing a name expands its details and pressing again folds them', async ($, on) => {
-  const { agents } = world(on)
+  const { agents, clock } = world(on)
   await spawn($, { prompt: 'p' }) // a1
   agents.push(info('a1', 'build', 'completed'))
   await $.tool.call(inLoop('a1', { tool: 'Read', file_path: '/repo/hooks/register.tsx' } as const))
   await $.tool.call(inLoop('a1', { tool: 'Bash', command: 'false' } as const))
   await $.turn.complete({ ...finish('a1', words(120)), usage })
+  await clock.set(65_000)
 
   const ui = await mount($)
   expect(await ui.find({ key: 'detail-a1' })).toBeUndefined()
@@ -285,11 +286,14 @@ test('pressing a name expands its details and pressing again folds them', async 
   expect(await text(ui, 'tokens-a1')).toContain('1.2k + 40k cached')
   expect(await text(ui, 'tools-a1')).toContain('2  ✗1')
   expect(await text(ui, 'report-a1')).toContain('120 words · long')
-  expect(await text(ui, 'last-a1-0')).toContain('last    Read: register.tsx')
+  expect(await text(ui, 'started-a1')).toContain('started 1:05 ago')
+  // Each call with how long ago it started, at the card's right edge.
+  expect(await text(ui, 'last-a1-0')).toMatch(/last    Read: register\.tsx\s+1:05 ago │$/)
   expect(await text(ui, 'last-a1-1')).toContain('Bash: false  ✗')
-  expect(await prop(ui, 'last-a1-1', 'color', 1)).toBe(PALETTE.failed)
-  expect(await prop(ui, 'tokens-a1', 'color')).toBe(PALETTE.muted)
-  expect(await prop(ui, 'tokens-a1', 'color', 1)).toBe(PALETTE.text)
+  // A detail line: the card's edge, the dim label, the bright value.
+  expect(await prop(ui, 'last-a1-1', 'color', 2)).toBe(PALETTE.failed)
+  expect(await prop(ui, 'tokens-a1', 'color', 1)).toBe(PALETTE.muted)
+  expect(await prop(ui, 'tokens-a1', 'color', 2)).toBe(PALETTE.text)
 
   await ui.press({ key: 'open-a1' })
   expect(await ui.find({ key: 'detail-a1' })).toBeUndefined()
@@ -340,8 +344,8 @@ test('an agent sits inside the card of its parent; an agent whose parent left ge
   expect(await text(ui, 'row-a3')).toMatch(/^│ \S build/)
   expect(await text(ui, 'row-a4')).toMatch(/^│ \S orphan/)
   // One lane column for every card, past the nested model.
-  expect((await text(ui, 'meta-a3')).indexOf('━')).toBeGreaterThan(0)
-  expect((await text(ui, 'meta-a3')).indexOf('━')).toBe((await text(ui, 'meta-a2')).indexOf('━'))
+  expect((await text(ui, 'meta-a3')).indexOf('▆')).toBeGreaterThan(0)
+  expect((await text(ui, 'meta-a3')).indexOf('▆')).toBe((await text(ui, 'meta-a2')).indexOf('▆'))
 })
 
 test('rows show the current tool while working; a failed call flashes for a second', async ($, on) => {
@@ -355,7 +359,7 @@ test('rows show the current tool while working; a failed call flashes for a seco
   await $.tool.call(inLoop('a1', { tool: 'Bash', command: 'false' } as const))
 
   let ui = await mount($)
-  expect(await text(ui, 'now-main')).toBe('  └ Bash: Run the tests')
+  expect(await text(ui, 'now-main')).toBe('  └ Bash: Run the tests · 0:00 ago')
   expect(await text(ui, 'now-a1')).toContain('└ Bash: false')
   expect(await prop(ui, 'glyph-a1', 'inverse')).toBe(true)
   expect(await prop(ui, 'glyph-main', 'inverse')).toBe(false)
@@ -387,10 +391,10 @@ test('the current tool names a file by its last segment', async ($, on) => {
   await $.tool.call(inLoop('a1', { tool: 'Read', file_path: '/repo/hooks/register.tsx' } as const))
 
   const ui = await mount($)
-  expect(await text(ui, 'now-a1')).toMatch(/Read: register\.tsx\s+│$/)
+  expect(await text(ui, 'now-a1')).toMatch(/Read: register\.tsx · 0:00 ago\s+│$/)
 })
 
-test('a tool call shows its clock while it runs, cut so the clock fits; the clock goes when it returns', async ($, on) => {
+test('a tool call shows its clock while it runs, cut so the clock fits; once it returns, the time since', async ($, on) => {
   const { agents, clock, release } = world(on)
   await spawn($, { prompt: 'p' }) // a1
   await spawn($, { prompt: 'p' }) // a2
@@ -407,8 +411,31 @@ test('a tool call shows its clock while it runs, cut so the clock fits; the cloc
 
   release()
   await Promise.all([short, long])
+  await clock.set(50_000)
   ui = await mount($)
-  expect(await text(ui, 'now-a1')).toMatch(/^│   └ Bash: sleep 90\s+│$/)
+  expect(await text(ui, 'now-a1')).toMatch(/^│   └ Bash: sleep 90 · 0:08 ago\s+│$/)
+})
+
+test('a working agent with no tool call or return for 3 minutes turns its tool line yellow', async ($, on) => {
+  const { agents, clock } = world(on)
+  await spawn($, { prompt: 'p' }) // a1 calls a tool
+  await spawn($, { prompt: 'p' }) // a2 calls none
+  agents.push(info('a1', 'build', 'running'), info('a2', 'think', 'running'))
+  await $.tool.call(inLoop('a1', { tool: 'Read', file_path: '/repo/hooks/register.tsx' } as const))
+  await clock.set(179_000)
+
+  let ui = await mount($)
+  expect(await prop(ui, 'now-a1', 'color', 1)).toBe(PALETTE.muted)
+  expect(await ui.find({ key: 'now-a2' })).toBeUndefined()
+  expect(await ui.find({ key: 'quietnote' })).toBeUndefined()
+  await ui.unmount()
+
+  await clock.set(180_000)
+  ui = await mount($)
+  expect(await text(ui, 'now-a1')).toContain('└ Read: register.tsx · 3:00 ago')
+  expect(await prop(ui, 'now-a1', 'color', 1)).toBe(PALETTE.soon)
+  expect(await text(ui, 'now-a2')).toContain('└ no tool call · 3:00')
+  expect(await text(ui, 'quietnote')).toBe('└ yellow: no tool call or return for 3:00')
 })
 
 test('a message to main shows in the card title from an agent of main, and yellow on the name of a nested agent', async ($, on) => {
@@ -652,8 +679,8 @@ test('each lane puts its agent on one time axis, in the color of its status', as
   await clock.set(60_000)
 
   const ui = await mount($)
-  expect(await text(ui, 'lane-a1')).toBe(`${'━'.repeat(13)}${' '.repeat(13)}`)
-  expect(await text(ui, 'lane-a2')).toBe(`${' '.repeat(13)}${'━'.repeat(13)}`)
+  expect(await text(ui, 'lane-a1')).toBe(`${'▆'.repeat(13)}${' '.repeat(13)}`)
+  expect(await text(ui, 'lane-a2')).toBe(`${' '.repeat(13)}${'▆'.repeat(13)}`)
   expect(await ui.find({ key: 'lane-main' })).toBeUndefined()
   expect(await prop(ui, 'lane-a1', 'color')).toBe(PALETTE.done)
   expect(await prop(ui, 'lane-a2', 'color')).toBe(PALETTE.working)
@@ -713,6 +740,19 @@ test('a lane keeps its agents together under one heading, with the branch of an 
   await ui.press({ key: 'view' })
   expect(await text(ui, 'dg-0')).toContain('Lane 1 · feat-x')
   expect(await text(ui, 'dg-2')).toMatch(/main.*implement/)
+})
+
+test('each lane colors its heading and its card edges; lane 6 takes the color of lane 1', async ($, on) => {
+  const { agents } = world(on)
+  agents.push(...[1, 2, 3, 4, 5, 6].map(n => info(`a${n}`, `Lane ${n}: work`, 'running')), info('a7', 'scan', 'running'))
+
+  const ui = await mount($)
+  for (const n of [1, 2, 3, 4, 5, 6]) {
+    const color = LANE_COLORS[(n - 1) % LANE_COLORS.length]
+    expect([n, await prop(ui, `heading-a${n}`, 'color'), await prop(ui, `end-a${n}`, 'color')]).toEqual([n, color, color])
+  }
+  expect(await prop(ui, 'end-a6', 'color')).toBe(LANE_COLORS[0])
+  expect(await prop(ui, 'end-a7', 'color')).toBe(PALETTE.muted)
 })
 
 test("a worktree agent's branch heads its lane, from git's list of worktrees at the agent's first tool call", async ($, on) => {
@@ -788,6 +828,12 @@ test('a lane heading sits over its first box, and the parent stays level with th
   expect(row(rows, 16)).toContain('└─┤')
 })
 
+test("a lane's box and heading take its color; main's box keeps the lines' color", () => {
+  const rows = diagram(tree({ ...leaf('implement', false), title: 'Lane 1', edge: 'violet' }), 44, 0, 'line', 'pulse').rows
+  expect(rows[0]!.find(r => r.text.includes('Lane 1'))?.color).toBe('violet')
+  expect(rows[1]!.map(r => r.color)).toEqual(['line', 'violet'])
+})
+
 test('a wide tree grows down; a deep tree narrows its boxes to fit the pane, then cuts at its edge', () => {
   const kids = (n: number) => Array.from({ length: n }, (_, i) => leaf(`agent ${i}`, false))
   const chain = (n: number): Node => (n === 0 ? leaf('end', false) : { ...leaf(`level ${n}`, false), kids: [chain(n - 1)] })
@@ -824,7 +870,7 @@ test('every text color in the palette reads on its background', () => {
     return 0.2126 * r! + 0.7152 * g! + 0.0722 * b!
   }
   const { bg, ...text } = PALETTE
-  for (const [name, hex] of Object.entries(text)) {
+  for (const [name, hex] of [...Object.entries(text), ...LANE_COLORS.map((hex, i) => [`lane ${i + 1}`, hex] as const)]) {
     expect([name, (lum(hex) + 0.05) / (lum(bg) + 0.05) >= 4.5]).toEqual([name, true])
   }
 })
