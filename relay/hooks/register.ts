@@ -1,4 +1,4 @@
-import type { EngineInterface, Register } from 'claude-code'
+import type { AgentInfo, AgentStatus, EngineInterface, Register } from 'claude-code'
 
 const SOFT_LIMIT = 180_000
 const MAX_CYCLES = 10
@@ -6,9 +6,19 @@ const MAX_CYCLES = 10
 const stopNote = (why: string) =>
   `[relay] ${why} ` +
   'Continue only to the next logical breakpoint, then stop. Do not start new work. ' +
+  'If background agents still run, wait for each to report and record its result first. ' +
   'Then write a handoff with the writing-handoffs skill. ' +
   'End your final message with one line: "HANDOFF: <absolute path of the handoff file>". ' +
   'If the whole task is complete, end with the line "RELAY: DONE" instead.'
+
+const waitNote = (live: AgentInfo[]) =>
+  `[relay] Do not clear yet: ${live.length} background agent(s) still run (${live.map(a => a.description).join('; ')}). ` +
+  '/clear would lose their results. End this turn without the HANDOFF line. ' +
+  'When each agent reports, record its result in the handoff. After the last one reports, end with the HANDOFF line again.'
+
+// Statuses whose result a /clear would lose.
+// ponytail: background Bash tasks are not in $.agent.list(); guard them too if a handoff ever loses one
+const LIVE: AgentStatus[] = ['pending', 'running', 'waiting']
 
 const pastLimit = (tokens: number) =>
   `The context is at ${Math.round(tokens / 1000)}K tokens, past the ${SOFT_LIMIT / 1000}K soft limit.`
@@ -19,6 +29,8 @@ let cycles = 0
 let isStopAsked = false
 // One cycle the person asked for with /relay now, armed or not.
 let isOnce = false
+// The wait note goes out once per handoff, so a repeated HANDOFF line cannot loop prompts.
+let isWaitAsked = false
 
 function showStatus($: EngineInterface) {
   const text = isArmed ? `relay ${cycles}/${MAX_CYCLES}` : isOnce ? 'relay once' : undefined
@@ -81,6 +93,10 @@ export const register: Register = on => {
 
   // Mid-turn: the first tool result past the limit carries the soft stop note to the model.
   on('tool.call', async ($, e, next) => {
+    // Past the limit, the main loop starts no new subagent: it waits for the live ones, then hands off.
+    if (e.tool === 'Agent' && e.agentId === undefined && (isStopAsked || (isArmed && (await contextTokens($)) >= SOFT_LIMIT))) {
+      return { deny: `[relay] No new subagents past the ${SOFT_LIMIT / 1000}K soft limit. Wait for the running agents, then write the handoff.` }
+    }
     const ran = await next(e)
     if (!isArmed || isStopAsked || e.agentId !== undefined || ran.deny !== undefined) {
       return ran
@@ -134,9 +150,20 @@ export const register: Register = on => {
       return done
     }
 
+    const live = (await $.agent.list()).filter(a => LIVE.includes(a.status))
+    if (live.length > 0) {
+      $.ui.toast(`Relay waits: ${live.length} background agent(s) still run`)
+      if (!isWaitAsked) {
+        isWaitAsked = true
+        $.clock.after(0, () => void $.prompt.submit({ text: waitNote(live) }))
+      }
+      return done
+    }
+
     if (isArmed) {
       cycles += 1
     }
+    isWaitAsked = false
     isStopAsked = false
     isOnce = false
     // After the turn: $.command.run rejects inside a hook the turn waits on.

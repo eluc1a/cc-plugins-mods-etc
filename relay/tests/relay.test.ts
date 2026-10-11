@@ -1,8 +1,8 @@
 import { expect, mock, test } from 'claude-code/testing'
-import type { On } from 'claude-code'
+import type { AgentInfo, On } from 'claude-code'
 
 // The engine beneath the relay: context size, prompts, commands and toasts, all recorded.
-function world(on: On, context: { tokens: number }) {
+function world(on: On, context: { tokens: number }, agents: AgentInfo[] = []) {
   const seen = { commands: [] as string[], prompts: [] as string[], toasts: [] as string[] }
   const clock = mock.clock(on)
 
@@ -20,6 +20,7 @@ function world(on: On, context: { tokens: number }) {
     seen.prompts.push(e.text)
     return { text: e.text }
   })
+  on('agent.list', () => ({ value: agents }))
   on('fs.stat', () => ({ value: { kind: 'file', size: 1, mtimeMs: 0, isLink: false } as const }))
   on('tool.call', () => ({ result: 'ok' }))
   on('turn.complete', ($, e) => ({ text: e.answer }))
@@ -58,21 +59,21 @@ test('past 180K, one soft stop note, then handoff, /clear and restart', async ($
   expect(seen.prompts[0]).toContain('/repo/docs/h.md')
 })
 
-test('stops after 5 cycles and on RELAY: DONE', async ($, on) => {
+test('stops after 10 cycles and on RELAY: DONE', async ($, on) => {
   const { seen, clock } = world(on, { tokens: 190_000 })
   await $.command.run(relayOn)
 
-  for (let i = 0; i < 6; i += 1) {
+  for (let i = 0; i < 11; i += 1) {
     await $.turn.complete({ ...answer, answer: 'HANDOFF: /repo/docs/h.md' })
     await clock.settle()
   }
-  expect(seen.commands.length).toBe(5)
-  expect(seen.toasts.at(-1)).toContain('after 5 cycles')
+  expect(seen.commands.length).toBe(10)
+  expect(seen.toasts.at(-1)).toContain('after 10 cycles')
 
   await $.command.run(relayOn)
   await $.turn.complete({ ...answer, answer: 'All tests pass.\nRELAY: DONE' })
   await clock.settle()
-  expect(seen.commands.length).toBe(5)
+  expect(seen.commands.length).toBe(10)
   expect(seen.toasts.at(-1)).toContain('task complete')
 })
 
@@ -104,20 +105,57 @@ test('/relay now with the relay off: one note, one handoff cycle, then off again
 test('/relay now past the cycle limit still runs, and /relay off cancels it', async ($, on) => {
   const { seen, clock } = world(on, { tokens: 190_000 })
   await $.command.run(relayOn)
-  for (let i = 0; i < 6; i += 1) {
+  for (let i = 0; i < 11; i += 1) {
     await $.turn.complete({ ...answer, answer: 'HANDOFF: /repo/docs/h.md' })
     await clock.settle()
   }
-  expect(seen.commands.length).toBe(5)
+  expect(seen.commands.length).toBe(10)
 
   await $.command.run({ ...relayOn, args: 'now' })
   await $.turn.complete({ ...answer, answer: 'HANDOFF: /repo/docs/h.md' })
   await clock.settle()
-  expect(seen.commands.length).toBe(6)
+  expect(seen.commands.length).toBe(11)
 
   await $.command.run({ ...relayOn, args: 'now' })
   await $.command.run({ ...relayOn, args: 'off' })
   await $.turn.complete({ ...answer, answer: 'HANDOFF: /repo/docs/h.md' })
   await clock.settle()
-  expect(seen.commands.length).toBe(6)
+  expect(seen.commands.length).toBe(11)
+})
+
+test('a live background agent holds the /clear until it ends', async ($, on) => {
+  const agents: AgentInfo[] = [{ id: 'a1', description: 'Lane 1: scan', type: 'general-purpose', status: 'running' }]
+  const { seen, clock } = world(on, { tokens: 190_000 }, agents)
+  await $.command.run(relayOn)
+
+  await $.turn.complete({ ...answer, answer: 'HANDOFF: /repo/docs/h.md' })
+  await clock.settle()
+  expect(seen.commands).toEqual([])
+  expect(seen.prompts).toHaveLength(1)
+  expect(seen.prompts[0]).toContain('Lane 1: scan')
+
+  // A repeated HANDOFF line while the agent runs: no second note, still no /clear.
+  await $.turn.complete({ ...answer, answer: 'HANDOFF: /repo/docs/h.md' })
+  await clock.settle()
+  expect(seen.commands).toEqual([])
+  expect(seen.prompts).toHaveLength(1)
+
+  agents[0]!.status = 'completed'
+  await $.turn.complete({ ...answer, answer: 'HANDOFF: /repo/docs/h.md' })
+  await clock.settle()
+  expect(seen.commands).toEqual(['clear'])
+})
+
+test('past 180K, a new subagent is denied; below it, allowed', async ($, on) => {
+  const context = { tokens: 100_000 }
+  world(on, context)
+  await $.command.run(relayOn)
+  const spawn = { tool: 'Agent', description: 'Lane 9: x', prompt: 'x' } as const
+
+  expect((await $.tool.call(spawn)).deny).toBeUndefined()
+  context.tokens = 185_000
+  expect((await $.tool.call(spawn)).deny).toContain('No new subagents')
+  // A subagent's own spawn is not the main loop's.
+  const fromSubagent = { ...spawn, agentId: 'sub-1' } as const
+  expect((await $.tool.call(fromSubagent)).deny).toBeUndefined()
 })
