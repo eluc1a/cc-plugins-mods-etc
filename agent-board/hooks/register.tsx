@@ -48,6 +48,15 @@ const ROUTED = ['Explore', 'general-purpose']
 const JEV_TIMEOUT_MS = 3000
 // A work lane, from the start of an Agent description: `Lane 2: review the diff`.
 const LANE = /^lane (\d+):\s*/i
+// The rule that makes the model write that prefix, so the lanes need no CLAUDE.md on the machine.
+export const LANE_RULE = {
+  id: 'agent-board:lanes',
+  text:
+    'When you run work in parallel with subagents, start each Agent description with `Lane N: ` ' +
+    '(for example `Lane 1: implement the parser`). Give a follow-up agent for the same work (review, fix) ' +
+    'the same lane number. The agent board groups agents by this prefix.',
+  scope: 'session',
+} as const
 
 // $.state, so a save of this mod keeps the counts; a restart still forgets them.
 const agents = atom({ plugin: 'agent-board', key: 'agents' } as const, {} as Record<string, AgentStat>)
@@ -252,6 +261,12 @@ export const register: Register = on => {
     await $.command.register({ name: 'board', description: 'Show the agent tree of this session in a pane' })
 
     return next(e)
+  })
+
+  // Only where the model can spawn an agent.
+  on('prompt.compose', async ($, e, next) => {
+    const composed = await next(e)
+    return e.tools.includes('Agent') ? { sections: [...composed.sections, LANE_RULE] } : composed
   })
 
   on('command.run', { command: 'board' }, async $ => {

@@ -4,7 +4,7 @@ import type { AgentInfo, AgentSpawnArgs, AgentStatus, On, PaneOpenArgs } from 'c
 
 import { diagram } from '../hooks/diagram'
 import type { Node } from '../hooks/diagram'
-import { LANE_COLORS, PALETTE, short } from '../hooks/register'
+import { LANE_COLORS, LANE_RULE, PALETTE, short } from '../hooks/register'
 import { JEV_MODEL, JEV_URL, pick, question } from '../hooks/route'
 
 const words = (n: number) => Array.from({ length: n }, () => 'word').join(' ')
@@ -873,4 +873,13 @@ test('every text color in the palette reads on its background', () => {
   for (const [name, hex] of [...Object.entries(text), ...LANE_COLORS.map((hex, i) => [`lane ${i + 1}`, hex] as const)]) {
     expect([name, (lum(hex) + 0.05) / (lum(bg) + 0.05) >= 4.5]).toEqual([name, true])
   }
+})
+
+test('the lane rule joins the system prompt only where the Agent tool is offered', async ($, on) => {
+  const base = { id: 'intro', text: 'x', scope: 'shared' } as const
+  on('prompt.compose', () => ({ sections: [base] }))
+  const input = { model: 'opus', promptModel: 'opus', surfaces: [], outputStyle: null, traits: [] } as const
+
+  expect((await $.prompt.compose({ ...input, tools: ['Agent', 'Bash'] })).sections).toEqual([base, LANE_RULE])
+  expect((await $.prompt.compose({ ...input, tools: ['Bash'] })).sections).toEqual([base])
 })
