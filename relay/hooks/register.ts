@@ -40,6 +40,9 @@ function showStatus($: EngineInterface) {
 function disarm($: EngineInterface) {
   isArmed = false
   isOnce = false
+  // A stopped relay must not keep denying subagents or holding back the wait note.
+  isStopAsked = false
+  isWaitAsked = false
   showStatus($)
 }
 
@@ -73,8 +76,7 @@ export const register: Register = on => {
       isStopAsked = false
     }
     if (arg === 'off') {
-      isArmed = false
-      isOnce = false
+      disarm($)
     }
     if (arg === 'now') {
       isOnce = true

@@ -159,3 +159,22 @@ test('past 180K, a new subagent is denied; below it, allowed', async ($, on) => 
   const fromSubagent = { ...spawn, agentId: 'sub-1' } as const
   expect((await $.tool.call(fromSubagent)).deny).toBeUndefined()
 })
+
+test('after the relay stops, a new subagent is allowed again', async ($, on) => {
+  const context = { tokens: 185_000 }
+  const { clock } = world(on, context)
+  const spawn = { tool: 'Agent', description: 'Lane 9: x', prompt: 'x' } as const
+
+  await $.command.run(relayOn)
+  await $.tool.call({ tool: 'Bash', command: 'ls' })
+  expect((await $.tool.call(spawn)).deny).toContain('No new subagents')
+  await $.turn.complete({ ...answer, answer: 'RELAY: DONE' })
+  await clock.settle()
+  context.tokens = 20_000
+  expect((await $.tool.call(spawn)).deny).toBeUndefined()
+
+  await $.command.run({ ...relayOn, args: 'now' })
+  expect((await $.tool.call(spawn)).deny).toContain('No new subagents')
+  await $.command.run({ ...relayOn, args: 'off' })
+  expect((await $.tool.call(spawn)).deny).toBeUndefined()
+})
