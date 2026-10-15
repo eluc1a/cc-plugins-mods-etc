@@ -40,6 +40,7 @@ Commands: `/relay on`, `/relay off`, `/relay now` (one handoff cycle at once).
 - Lanes: an agent whose description starts with `Lane N: ` is grouped under a colored `Lane N` heading. The plugin adds this rule to the system prompt.
 - Model routing: a spawn that names no model gets one from Jev (TypeSafe, through OpenRouter) when `OPENROUTER_API_KEY` is set in the environment or in a `.env` in the session's directory. Otherwise Explore agents get haiku and the rest inherit.
 - `/agent-board:board-test <test>` launches cheap Haiku agents to exercise the pane. With no argument it lists the tests.
+- Live file: on every event and every 10 s the mod writes a snapshot to `~/.claude/agent-board/live.json` for outside viewers, such as a browser village. The top level is `{ at, session, main, agents }`, where each agent holds its info and a `stat`.
 
 ## Not in the marketplace
 

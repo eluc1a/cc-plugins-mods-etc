@@ -120,6 +120,23 @@ async function touch($: EngineInterface, id: string, fn: (s: AgentStat, at: numb
     const s = { ...blank(at), ...all[id] }
     return { ...all, [id]: { ...s, at, ...fn(s, at) } }
   })
+  await publish($).catch(() => undefined)
+}
+
+// The live file the village page (~/dev/sub-ui) reads: the roster and each agent's record, rewritten on every event.
+// ponytail: one file for every session, the session that moved last wins; a file per session if two run at once
+export const LIVE = '.claude/agent-board/live.json'
+async function publish($: EngineInterface) {
+  const { value: stats = {} } = await $.state.get({ plugin: 'agent-board', key: 'agents' })
+  const { value: v } = await $.state.get({ plugin: 'agent-board', key: 'view' })
+  const list = roster(await $.agent.list(), stats, v?.cleared ?? [])
+  const snapshot = {
+    at: await $.clock.now(),
+    session: await $.session.id(),
+    main: { ...stats[MAIN], model: await $.session.model() },
+    agents: list.map(a => ({ ...a, stat: stats[a.id] })),
+  }
+  await $.fs.write(`${await $.env.get('HOME')}/${LIVE}`, JSON.stringify(snapshot))
 }
 
 // The list entry of an agent, kept for its row once the engine drops its task.
@@ -200,6 +217,8 @@ async function worktreeBranch($: EngineInterface, id: string) {
 async function refresh($: EngineInterface) {
   const isRunning = (await $.agent.list()).some(a => a.status === 'running')
   const isOpen = (await $.ui.panes()).some(p => p.id === PANE)
+  // A kill or an end raises no event of the mod's: the refresh carries the new status to the village.
+  await publish($).catch(() => undefined)
   if (!isRunning && !isOpen) {
     timer?.cancel()
     timer = undefined

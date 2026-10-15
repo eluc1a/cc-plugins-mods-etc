@@ -4,7 +4,7 @@ import type { AgentInfo, AgentSpawnArgs, AgentStatus, On, PaneOpenArgs } from 'c
 
 import { diagram } from '../hooks/diagram'
 import type { Node } from '../hooks/diagram'
-import { LANE_COLORS, LANE_RULE, PALETTE, short } from '../hooks/register'
+import { LANE_COLORS, LANE_RULE, LIVE, PALETTE, short } from '../hooks/register'
 import { JEV_MODEL, JEV_URL, pick, question } from '../hooks/route'
 
 const words = (n: number) => Array.from({ length: n }, () => 'word').join(' ')
@@ -21,7 +21,7 @@ const paneProps = {
 
 // The engine beneath the mod: the agent list, spawns, pane calls and the render sites, all recorded.
 function world(on: On) {
-  const seen = { spawned: [] as (string | undefined)[], opened: [] as PaneOpenArgs[], commands: [] as string[], spinner: [] as string[] }
+  const seen = { spawned: [] as (string | undefined)[], opened: [] as PaneOpenArgs[], commands: [] as string[], spinner: [] as string[], writes: new Map<string, string>() }
   const agents: AgentInfo[] = []
   const clock = mock.clock(on)
   let count = 0
@@ -57,6 +57,12 @@ function world(on: On) {
     return e.tool === 'Bash' && e.command === 'false' ? { result: 'exit 1', isError: true } : { result: 'ok' }
   })
   on('session.model', () => ({ value: 'claude-opus-5-5' }))
+  on('session.id', () => ({ value: 's1' }))
+  // The live file stays in memory: a test never writes the person's real one.
+  on('fs.write', (_$, e) => {
+    seen.writes.set(e.path, e.text)
+    return { value: undefined }
+  })
   on('turn.start', (_$, e) => ({ turnId: e.turnId }))
   on('turn.complete', (_$, e) => ({ text: e.answer }))
 
@@ -882,4 +888,18 @@ test('the lane rule joins the system prompt only where the Agent tool is offered
 
   expect((await $.prompt.compose({ ...input, tools: ['Agent', 'Bash'] })).sections).toEqual([base, LANE_RULE])
   expect((await $.prompt.compose({ ...input, tools: ['Bash'] })).sections).toEqual([base])
+})
+
+test('every event rewrites the live file the village reads: main, then each agent with its record', async ($, on) => {
+  const { seen, agents } = world(on)
+  on('env.get', (_$, e) => ({ value: e.name === 'HOME' ? '/home/u' : undefined }))
+  await spawn($, { prompt: 'p', model: 'sonnet', description: 'Lane 2: read docs' }) // a1
+  agents.push(info('a1', 'Lane 2: read docs', 'running'))
+  await $.tool.call(inLoop('a1', { tool: 'Read', file_path: '/repo/src/a.ts' }))
+
+  const live = JSON.parse(seen.writes.get(`/home/u/${LIVE}`) ?? '{}')
+  expect(live.session).toBe('s1')
+  expect(live.main.model).toBe('claude-opus-5-5')
+  expect(live.agents.map((a: AgentInfo) => [a.id, a.description, a.status])).toEqual([['a1', 'Lane 2: read docs', 'running']])
+  expect(live.agents[0].stat.last.at(-1).label).toBe('Read: a.ts')
 })
