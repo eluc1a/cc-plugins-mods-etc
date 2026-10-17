@@ -65,6 +65,9 @@ let timer: Timer | undefined
 let spin: Timer | undefined
 // The agents whose worktree the board looked for; a reload forgets them, and each costs one more look.
 const looked = new Set<string>()
+// The ended agents of a session that a /clear ended, until the next session's state takes them.
+// ponytail: a module variable, so a reload between the /clear and the next event loses the record; $.store keyed by process if that bites
+let carry: Record<string, AgentStat> | undefined
 
 type Kind = 'working' | 'idle' | 'done' | 'failed' | 'other'
 // `wait`: how long the current tool call has run, or how long ago the last one returned.
@@ -115,6 +118,7 @@ function brief(e: ToolCallInput) {
 // Every write stamps the time, so the idle clock counts from the agent's last event.
 // The blank fills the fields a record from an older save of this mod lacks.
 async function touch($: EngineInterface, id: string, fn: (s: AgentStat, at: number) => Partial<AgentStat>) {
+  await adopt($)
   const at = await $.clock.now()
   await update($, agents, all => {
     const s = { ...blank(at), ...all[id] }
@@ -129,7 +133,7 @@ export const LIVE = '.claude/agent-board/live.json'
 async function publish($: EngineInterface) {
   const { value: stats = {} } = await $.state.get({ plugin: 'agent-board', key: 'agents' })
   const { value: v } = await $.state.get({ plugin: 'agent-board', key: 'view' })
-  const list = roster(await $.agent.list(), stats, v?.cleared ?? [])
+  const list = roster(await $.agent.list(), stats, v)
   const snapshot = {
     at: await $.clock.now(),
     session: await $.session.id(),
@@ -146,8 +150,9 @@ async function entry($: EngineInterface, id: string) {
 }
 
 // The engine drops an ended subagent's task a while after it returns: the kept entry holds its row,
-// in spawn order, until `c` clears it. A cleared agent that runs again shows again.
-function roster(list: AgentInfo[], stats: Record<string, AgentStat>, cleared: string[]): AgentInfo[] {
+// in spawn order, until `c` clears it. A cleared agent that runs again shows again. `p` hides the rows from before a /clear.
+function roster(list: AgentInfo[], stats: Record<string, AgentStat>, v: BoardView | undefined): AgentInfo[] {
+  const cleared = v?.cleared ?? []
   const ids = new Set(list.map(a => a.id))
   const kept = Object.entries(stats).flatMap(([id, s]): AgentInfo[] =>
     s.info === undefined || ids.has(id)
@@ -157,7 +162,35 @@ function roster(list: AgentInfo[], stats: Record<string, AgentStat>, cleared: st
   const rank = new Map(Object.keys(stats).map((id, i) => [id, i]))
   const at = (id: string) => rank.get(id) ?? rank.size
 
-  return [...list, ...kept].filter(a => !(cleared.includes(a.id) && ENDED.includes(a.status))).sort((a, b) => at(a.id) - at(b.id))
+  return [...list, ...kept]
+    .filter(a => !(cleared.includes(a.id) && ENDED.includes(a.status)) && !(v?.hidePast === true && stats[a.id]?.isPast === true))
+    .sort((a, b) => at(a.id) - at(b.id))
+}
+
+// At a /clear: the ended agents on the board, each kept whole and marked, so the next session shows them as a record.
+async function archive($: EngineInterface) {
+  const { value: stats = {} } = await $.state.get({ plugin: 'agent-board', key: 'agents' })
+  const { value: v } = await $.state.get({ plugin: 'agent-board', key: 'view' })
+  const list = roster(await $.agent.list(), stats, v ? { ...v, hidePast: false } : v)
+  return Object.fromEntries(
+    list
+      .filter(a => ENDED.includes(a.status))
+      .map(a => {
+        const s = { ...blank(0), ...stats[a.id] }
+        const info = s.info ?? { description: a.description, type: a.type, name: a.name, parentId: a.parentId }
+        return [a.id, { ...s, info, isDone: a.status === 'completed', isPast: true }]
+      }),
+  )
+}
+
+// The first write of the session after a /clear puts the record first, ahead of the new session's agents.
+async function adopt($: EngineInterface) {
+  if (carry === undefined) {
+    return
+  }
+  const past = carry
+  carry = undefined
+  await update($, agents, all => ({ ...past, ...Object.fromEntries(Object.entries(all).filter(([id]) => !(id in past))) }))
 }
 
 // OPENROUTER_API_KEY from the environment, else from a .env in the session's directory.
@@ -263,9 +296,10 @@ function animate($: EngineInterface) {
 
 // Each open sets closeOnEscape and the asked width anew, so the refresh opens with them too.
 async function show($: EngineInterface) {
+  await adopt($)
   const { value: stats = {} } = await $.state.get({ plugin: 'agent-board', key: 'agents' })
   const { value: v } = await $.state.get({ plugin: 'agent-board', key: 'view' })
-  const count = roster(await $.agent.list(), stats, v?.cleared ?? []).length
+  const count = roster(await $.agent.list(), stats, v).length
   await $.ui.open({ id: PANE, title: title(count), closeOnEscape: true, columns: WIDTH })
 }
 
@@ -278,6 +312,15 @@ async function open($: EngineInterface) {
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     await $.command.register({ name: 'board', description: 'Show the agent tree of this session in a pane' })
+
+    return next(e)
+  })
+
+  // A /clear ends the session's state; the process goes on, so the record waits in `carry`.
+  on('session.end', async ($, e, next) => {
+    if (e.reason === 'clear') {
+      carry = await archive($).catch(() => undefined)
+    }
 
     return next(e)
   })
@@ -407,7 +450,7 @@ export const register: Register = on => {
     const now = await $.clock.now()
     const stats = await read($, agents)
     const v = await read($, view)
-    const list = roster(await $.agent.list(), stats, v.cleared ?? [])
+    const list = roster(await $.agent.list(), stats, v)
     const width = e.props.bodyColumns || WIDTH
     const stat = (id: string) => ({ ...blank(now), ...stats[id] })
     const ids = new Set(list.map(a => a.id))
@@ -462,8 +505,9 @@ export const register: Register = on => {
     }
 
     const looks = new Map(list.map(a => [a.id, look(a.status, stat(a.id), COLD_MS)]))
-    // A returned agent with no live agent under it: `h` hides it, `c` clears it.
+    // A returned agent with no live agent under it: `h` hides it. `c` clears it, and a failed one too.
     const isDoneTree = (a: AgentInfo): boolean => looks.get(a.id)?.kind === 'done' && kids(a.id).every(isDoneTree)
+    const isEndedTree = (a: AgentInfo): boolean => ['done', 'failed'].includes(looks.get(a.id)?.kind ?? '') && kids(a.id).every(isEndedTree)
     const isHidden = (a: AgentInfo) => v.hideDone && isDoneTree(a)
     // The lanes' time axis: from the first shown start to now, or to the last end once nothing works.
     const spans = new Map(
@@ -484,7 +528,7 @@ export const register: Register = on => {
     const laneX = (deepest === 0 ? 0 : 2 + 2 * deepest) + 2 + MODEL_W + 1
     const laneW = inner - laneX >= LANE_MIN ? inner - laneX : 0
     const clear = () =>
-      void update($, view, w => ({ ...w, cleared: [...(w.cleared ?? []), ...list.filter(isDoneTree).map(a => a.id)] })).then(() => show($))
+      void update($, view, w => ({ ...w, cleared: [...(w.cleared ?? []), ...list.filter(isEndedTree).map(a => a.id)] })).then(() => show($))
     const toggle = (id: string) => () =>
       void update($, view, w => ({ ...w, open: w.open.includes(id) ? w.open.filter(x => x !== id) : [...w.open, id] }))
 
@@ -609,7 +653,11 @@ export const register: Register = on => {
         lines.splice(own, 0, <Box key={`gap-${a.id}`}><Text color={edge}>{`│ ${' '.repeat(inner)} │`}</Text></Box>)
       }
       const state = l.kind === 'other' ? a.status : l.kind
-      const what = [inside > 0 ? `${inside} agent${inside === 1 ? '' : 's'} inside` : '', s.isToMain === true ? '✉ sent to main' : '']
+      const what = [
+        s.isPast === true ? 'before /clear' : '',
+        inside > 0 ? `${inside} agent${inside === 1 ? '' : 's'} inside` : '',
+        s.isToMain === true ? '✉ sent to main' : '',
+      ]
         .filter(x => x !== '')
         .map(x => ` · ${x}`)
         .join('')
@@ -714,6 +762,7 @@ export const register: Register = on => {
     const color = { working: C.working, idle: C.muted, failed: C.failed, done: C.done }
     const isStarred = list.some(a => stats[a.id]?.isStar === true)
     const isQuiet = [mainLook, ...looks.values()].some(l => l.isQuiet === true)
+    const pastN = Object.values(stats).filter(s => s.isPast === true).length
     const isSkipped = list.some(a => a.parentId !== undefined && ids.has(a.parentId) && stats[a.id]?.isToMain === true && !isHidden(a))
 
     // Docked, the color fills the whole body; inline, the frame fits the tree.
@@ -795,6 +844,14 @@ export const register: Register = on => {
             </Button>
             <Text color={C.muted}>  esc close</Text>
           </Box>
+          {pastN > 0 && (
+            <Box key="keys3" flexDirection="row">
+              <Button key="past" plain hotkey="p" onPress={() => void update($, view, w => ({ ...w, hidePast: w.hidePast !== true })).then(() => show($))}>
+                <Text color={C.text}>{v.hidePast === true ? 'show past' : 'hide past'}</Text>
+              </Button>
+              <Text color={C.muted}>{`  ${pastN} from before /clear`}</Text>
+            </Box>
+          )}
         </Box>
       </Box>
     )

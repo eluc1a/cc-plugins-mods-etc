@@ -35,11 +35,14 @@ export type AgentStat = {
   branch?: string
   // The agent's list entry, kept so its row outlives the engine's task.
   info?: { description: string; type: string; name?: string; parentId?: string }
+  // The agent ended before a /clear: the board keeps its row as a record, `p` hides it.
+  isPast?: boolean
 }
 
 // Which rows are expanded, whether returned agents hide, whether motion is off, which returned agents `c` cleared,
-// and whether `v` shows the box diagram instead of the rows. `cleared` and `diagram` are absent from an older save.
-export type BoardView = { open: string[]; hideDone: boolean; still: boolean; cleared?: string[]; diagram?: boolean }
+// whether `v` shows the box diagram instead of the rows, and whether `p` hides the rows from before a /clear.
+// `cleared`, `diagram` and `hidePast` are absent from an older save.
+export type BoardView = { open: string[]; hideDone: boolean; still: boolean; cleared?: string[]; diagram?: boolean; hidePast?: boolean }
 
 declare module 'claude-code' {
   interface PluginState {

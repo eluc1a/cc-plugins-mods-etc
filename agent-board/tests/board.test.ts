@@ -47,6 +47,7 @@ function world(on: On) {
     return { type: 'engine', ref: 0 }
   })
   on('session.start', (_$, e) => ({ cwd: e.cwd }))
+  on('session.end', (_$, e) => ({ sessionId: e.sessionId }))
   // A Bash call whose command is `false` fails, as the shell would; one that starts `sleep` runs until `release()`.
   let release = () => {}
   const held = new Promise<void>(r => (release = r))
@@ -568,7 +569,7 @@ test('h hides returned agents, but keeps failed ones and a returned parent of a 
   expect(await ui.find({ key: 'row-a1' })).toBeDefined()
 })
 
-test('a returned agent keeps its row after the engine drops it; c clears returned ones', async ($, on) => {
+test('a returned agent keeps its row after the engine drops it; c clears returned and failed ones', async ($, on) => {
   const { agents, seen } = world(on)
   agents.push(
     info('a1', 'returned', 'running'),
@@ -586,11 +587,37 @@ test('a returned agent keeps its row after the engine drops it; c clears returne
   expect(await text(ui, 'row-a2')).toMatch(/✗ broke.*error │$/)
   await ui.press({ key: 'clear' })
   expect(await ui.find({ key: 'row-a1' })).toBeUndefined()
+  expect(await ui.find({ key: 'row-a2' })).toBeUndefined()
   expect(await ui.find({ key: 'row-a5' })).toBeUndefined()
-  for (const id of ['a2', 'a3', 'a4']) {
+  for (const id of ['a3', 'a4']) {
     expect(await ui.find({ key: `row-${id}` })).toBeDefined()
   }
-  expect(seen.opened.at(-1)?.title).toBe('Agents · 3')
+  expect(seen.opened.at(-1)?.title).toBe('Agents · 2')
+})
+
+test('a /clear keeps ended agents as a record marked before /clear; p hides them', async ($, on) => {
+  const { agents } = world(on)
+  agents.push(info('a1', 'old', 'running'), info('a2', 'cleared', 'running'))
+  await $.turn.complete(finish('a2', 'ok'))
+  agents.splice(1, 1, info('a2', 'cleared', 'completed'))
+  let ui = await mount($)
+  await ui.press({ key: 'clear' })
+  await ui.unmount()
+  await $.turn.complete(finish('a1', 'ok'))
+  agents.splice(0, 1, info('a1', 'old', 'completed'))
+
+  await $.session.end({ reason: 'clear', sessionId: 's1', resume: { id: 's1' } })
+  agents.splice(0, agents.length, info('a3', 'new', 'running'))
+  await $.tool.call(call('a3'))
+
+  ui = await mount($)
+  expect(await text(ui, 'title-a1')).toContain('before /clear')
+  expect(await text(ui, 'title-a3')).not.toContain('before /clear')
+  expect(await ui.find({ key: 'row-a2' })).toBeUndefined()
+  await ui.press({ key: 'past' })
+  expect(await ui.find({ key: 'row-a1' })).toBeUndefined()
+  expect(await ui.find({ key: 'row-a3' })).toBeDefined()
+  expect(await text(ui, 'past')).toContain('show past')
 })
 
 test('the spinner turns with the clock; m stops the motion and the flash', async ($, on) => {
