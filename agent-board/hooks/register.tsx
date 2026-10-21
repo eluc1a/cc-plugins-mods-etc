@@ -42,8 +42,6 @@ export const LANE_COLORS = ['#c08cff', '#5ce1e6', '#ff79e0', '#6aa6ff', '#f2f2f2
 // The input fields that name what a tool call works on: the first one present wins.
 const BRIEF_KEYS = ['description', 'file_path', 'command', 'pattern', 'url', 'query', 'skill', 'to']
 const ENDED: AgentStatus[] = ['completed', 'failed', 'killed']
-// Jev picks the model only for these types: a plugin's agent may set its own model in its definition.
-const ROUTED = ['Explore', 'general-purpose']
 // Past this the spawn goes on with the mod's own rule.
 const JEV_TIMEOUT_MS = 3000
 // A work lane, from the start of an Agent description: `Lane 2: review the diff`.
@@ -339,7 +337,7 @@ export const register: Register = on => {
 
   // A spawn that names no model: Jev picks it, else Explore gets haiku and the rest inherit.
   on('agent.spawn', async ($, e, next) => {
-    const jev = e.model === undefined && ROUTED.includes(e.subagentType) ? await route($, e).catch(err => `error ${String(err)}`) : undefined
+    const jev = e.model === undefined ? await route($, e).catch(err => `error ${String(err)}`) : undefined
     const set = typeof jev === 'object' ? jev.tier : e.subagentType === 'Explore' && e.model === undefined ? 'haiku' : undefined
     const why =
       typeof jev === 'object' ? `jev ${jev.tier} at ${jev.confidence.toFixed(2)}` : jev === undefined ? undefined : `${set ?? 'inherit'}, jev: ${jev}`

@@ -129,7 +129,7 @@ const answer = (choice: string, confidence: number): Reply => ({
   text: JSON.stringify({ answers: { tier: { type: 'choice', choice, probabilities: {}, confidence } } }),
 })
 
-test('Jev picks the model of an Explore or general-purpose spawn that names none', async ($, on) => {
+test('Jev picks the model of every spawn that names none', async ($, on) => {
   const { seen } = world(on)
   const asked = jev(on, () => answer('sonnet', 0.9))
 
@@ -137,9 +137,9 @@ test('Jev picks the model of an Explore or general-purpose spawn that names none
   expect((await spawn($, { prompt: 'p', subagentType: 'general-purpose' })).model).toBe('sonnet')
   expect((await spawn($, { prompt: 'p', subagentType: 'Explore', model: 'opus' })).model).toBe('opus')
   expect((await spawn($, { prompt: 'p', subagentType: 'claude-code-guide' })).model).toBe('sonnet')
-  expect(seen.spawned).toEqual(['sonnet', 'sonnet', 'opus', undefined])
+  expect(seen.spawned).toEqual(['sonnet', 'sonnet', 'opus', 'sonnet'])
 
-  expect(asked.length).toBe(2)
+  expect(asked.length).toBe(3)
   expect(asked[0]?.url).toBe(JEV_URL)
   expect(asked[0]?.auth).toBe('Bearer k')
   expect(asked[0]?.body.model).toBe(JEV_MODEL)
