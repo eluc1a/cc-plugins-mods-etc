@@ -4,7 +4,7 @@ import type { AgentInfo, AgentSpawnArgs, AgentStatus, On, PaneOpenArgs } from 'c
 
 import { diagram } from '../hooks/diagram'
 import type { Node } from '../hooks/diagram'
-import { LANE_COLORS, LANE_RULE, LIVE, PALETTE, short } from '../hooks/register'
+import { LANE_COLORS, LANE_RULE, LIVE, PALETTE, ROUTES, short } from '../hooks/register'
 import { JEV_MODEL, JEV_URL, pick, question } from '../hooks/route'
 
 const words = (n: number) => Array.from({ length: n }, () => 'word').join(' ')
@@ -71,7 +71,7 @@ function world(on: On) {
 }
 
 // The engine's own $ takes the whole spawn input: fill what the Agent tool would.
-const spawn = ($: Engine, args: AgentSpawnArgs) =>
+const spawn = ($: Engine, args: AgentSpawnArgs & { tool_use_id?: string }) =>
   $.agent.spawn({
     tool_use_id: 't1',
     description: 'd',
@@ -206,6 +206,34 @@ test('the expanded row says who picked the model and why', async ($, on) => {
   expect(await text(ui, 'model-a2')).toContain('model   haiku · haiku, jev: http 529')
   expect(await text(ui, 'meta-a1')).toMatch(/^│   sonnet\*/)
   await ui.unmount()
+})
+
+test('each spawn appends one routing record for the Herdr board, parallel spawns included', async ($, on) => {
+  const { seen } = world(on)
+  const replies: Reply[] = [answer('haiku', 1), { status: 529, text: '' }]
+  jev(on, () => replies.shift())
+  on('fs.read', (_$, e) => {
+    const t = seen.writes.get(e.path)
+    if (t === undefined) {
+      throw new Error('ENOENT')
+    }
+    return { value: t }
+  })
+
+  await Promise.all([
+    spawn($, { prompt: 'p', subagentType: 'general-purpose', tool_use_id: 'tu1' }),
+    spawn($, { prompt: 'p', subagentType: 'Explore', tool_use_id: 'tu2' }),
+  ])
+  await spawn($, { prompt: 'p', subagentType: 'general-purpose', model: 'opus', tool_use_id: 'tu3' })
+
+  const file = [...seen.writes].find(([path]) => path.endsWith(`/${ROUTES}/s1.jsonl`))?.[1] ?? ''
+  const lines = file.trimEnd().split('\n').map(l => JSON.parse(l))
+  const strip = ({ at, ...rest }: { at: number }) => (expect(typeof at).toBe('number'), rest)
+  expect(lines.map(strip)).toEqual([
+    { v: 1, sessionId: 's1', toolUseId: 'tu1', subagentType: 'general-purpose', model: 'haiku', star: true, reason: 'jev haiku at 1.00' },
+    { v: 1, sessionId: 's1', toolUseId: 'tu2', subagentType: 'Explore', model: 'haiku', star: true, reason: 'haiku, jev: http 529' },
+    { v: 1, sessionId: 's1', toolUseId: 'tu3', subagentType: 'general-purpose', model: 'opus', star: false, reason: null },
+  ])
 })
 
 test('the question lists the tiers in the order asked, and pick refuses what is not an answer', () => {

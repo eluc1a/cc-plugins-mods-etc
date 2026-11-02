@@ -227,6 +227,34 @@ async function route($: EngineInterface, e: AgentSpawnInput): Promise<Pick | str
   return p.confidence < MIN_CONFIDENCE ? `${p.tier} at ${p.confidence.toFixed(2)}, low` : p
 }
 
+// The routing record the Herdr board reads (v 1, the format of herdr-mods route-hook.mjs), one line per spawn.
+// $.fs has no append: one chain keeps parallel spawns from losing a line.
+export const ROUTES = '.claude/agent-board/routes'
+let routed = Promise.resolve()
+function record($: EngineInterface, e: AgentSpawnInput, set: string | undefined, why: string | undefined) {
+  // A failed write never blocks the spawn.
+  routed = routed
+    .then(async () => {
+      const session = await $.session.id()
+      const line = {
+        v: 1,
+        at: await $.clock.now(),
+        sessionId: session,
+        toolUseId: e.tool_use_id,
+        subagentType: e.subagentType,
+        model: set ?? e.model ?? null,
+        star: set !== undefined,
+        reason: why ?? null,
+      }
+      // The session id names a file: keep it to one path segment.
+      const path = `${await $.env.get('HOME')}/${ROUTES}/${session.replace(/[^\w.-]/g, '_')}.jsonl`
+      const old = await $.fs.read(path).catch(() => '')
+      await $.fs.write(path, `${typeof old === 'string' ? old : ''}${JSON.stringify(line)}\n`)
+    })
+    .catch(() => undefined)
+  return routed
+}
+
 // The branch of an agent spawned to run in a directory other than the session's.
 async function branchOf($: EngineInterface, cwd: string | undefined) {
   if (cwd === undefined || cwd === (await $.session.cwd())) {
@@ -341,6 +369,10 @@ export const register: Register = on => {
     const set = typeof jev === 'object' ? jev.tier : e.subagentType === 'Explore' && e.model === undefined ? 'haiku' : undefined
     const why =
       typeof jev === 'object' ? `jev ${jev.tier} at ${jev.confidence.toFixed(2)}` : jev === undefined ? undefined : `${set ?? 'inherit'}, jev: ${jev}`
+    // Only an Agent tool call: a workflow's agents share one tool_use_id, a resume is no new spawn.
+    if (e.workflow === undefined && e.resume === undefined) {
+      await record($, e, set, why)
+    }
     const ran = await next(set === undefined ? e : { ...e, model: set })
     if (ran.deny === undefined && ran.agentId !== undefined) {
       const { model, agentId } = ran
